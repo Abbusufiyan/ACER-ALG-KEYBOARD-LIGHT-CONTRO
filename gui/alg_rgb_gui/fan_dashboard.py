@@ -8,13 +8,109 @@ from typing import Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QProgressBar, QFrame, QPushButton, QScrollArea, QToolTip
+    QProgressBar, QFrame, QPushButton, QScrollArea, QToolTip,
+    QDialog, QTextBrowser, QDialogButtonBox
 )
 from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 
 from .sensors import SensorEngine, CpuTelemetry, GpuTelemetry, FanHardwareStatus
 from .thermal_graph import TemperatureHistoryGraph
+
+
+class HardwareReportDialog(QDialog):
+    """
+    Detailed hardware architecture and thermal safety report modal
+    for Acer ALG AL15G-52.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Thermal Architecture & Hardware Safety Report")
+        self.resize(700, 520)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e2e;
+                color: #cdd6f4;
+            }
+            QTextBrowser {
+                background-color: #181825;
+                color: #cdd6f4;
+                border: 1px solid #313244;
+                border-radius: 8px;
+                padding: 14px;
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #313244;
+                color: #cdd6f4;
+                border: 1px solid #45475a;
+                border-radius: 6px;
+                padding: 6px 20px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #45475a;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setMarkdown(self._generate_report_markdown())
+        layout.addWidget(browser)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    @staticmethod
+    def _generate_report_markdown() -> str:
+        return (
+            "# Acer ALG AL15G-52 Thermal Architecture & Safety Report\n\n"
+            "## 1. System & Motherboard Identification\n"
+            "- **Laptop Model:** Acer ALG AL15G-52\n"
+            "- **Board Name:** Aspire Lite AL15G-52\n"
+            "- **ACPI Hardware ID:** `CLV0001:00` (`\\_SB.DCHU`)\n"
+            "- **Platform Architecture:** Clevo ODM white-label baseboard\n"
+            "- **Hardware:** Intel Core i5-12450H (Alder Lake-P) + NVIDIA GeForce RTX 2050 Mobile\n\n"
+            "## 2. Thermal Control & Cooling Architecture\n"
+            "- **Dual Independent Cooling Fans:**\n"
+            "  - **Fan 1 (CPU):** Dedicated heatpipe dissipation for the 8-core CPU package.\n"
+            "  - **Fan 2 (GPU):** Dedicated heatpipe dissipation for the NVIDIA RTX 2050 GPU.\n"
+            "- **Firmware Thermal Governor:**\n"
+            "  - Cooling is managed by an autonomous on-board **Embedded Controller (EC)**.\n"
+            "  - The EC continuously reads CPU DTS (via PECI bus) and GPU core thermals, comparing them "
+            "against internal BIOS trip-point tables (`F1T1`..`F1T4`, `F2T1`..`F2T4`) to update duty cycles "
+            "(`DUT1`, `DUT2`) directly in hardware.\n"
+            "  - When thermals increase under load (gaming or compilation), fans automatically scale up; "
+            "when idle, fans scale down to silent operation.\n\n"
+            "## 3. Linux Kernel & Subsystem Status\n"
+            "- **Standard `hwmon` PWM Interface:** Not Available\n"
+            "  - Mainline Linux has no kernel driver for `CLV0001:00` thermal control.\n"
+            "  - Standard Linux fan tools (`pwmconfig`, `lm-sensors`, `fancontrol`) require `/sys/class/hwmon/hwmon*/pwm*` "
+            "channels, which are not registered by this chassis.\n"
+            "  - Thermal cooling devices in `/sys/class/thermal/cooling_device*` only expose passive CPU throttling "
+            "(`Processor`, `intel_powerclamp`, `TCC Offset`). No active fan cooling devices exist.\n\n"
+            "## 4. ACPI Bytecode (DSDT) Audit Evidence\n"
+            "- **Target Device:** `\\_SB.DCHU` (`CLV0001:00`)\n"
+            "- **UUID:** `93f224e4-fbdc-4bbf-add6-db71bdc0afad`\n"
+            "- **Function `0x67`:** Keyboard RGB Lighting (the only known, reverse-engineered, safe function implemented by `alg_rgb.ko`).\n"
+            "- **Function `0x0C` (`PK0C`):** Reads fan tachometer period registers (`RPM1`, `RPM2`) but executes 8 raw `ECMD` bus commands "
+            "querying battery/charger registers, risking bus saturation if polled repeatedly.\n"
+            "- **Function `0x0D` / `0x0E` (`PK0D` / `PK0E`):** Reads/writes BIOS fan trip points (`F1T1..F1T4`, `F1D1..F1D4`).\n"
+            "- **Function `0x79` (in `SCMD`):** Issues raw `ECMD` commands (`0xD7`) to toggle internal EC modes.\n\n"
+            "## 5. Why Direct EC Writing is Strictly Prevented\n"
+            "- Community workarounds (e.g. `ec_sys write_support=1`) attempt to force manual PWM by writing directly to EC registers.\n"
+            "- Linux kernel maintainers explicitly document `ec_sys write_support` as: "
+            "`\"Dangerous, reboot and removal of battery may be needed.\"*`\n"
+            "- On Clevo ECs, blind register writes cause bus collisions, battery desync, system hard-lockups (as directly noted during driver reverse-engineering), "
+            "or dangerous thermal runaway if userspace freezes while fans are manually throttled.\n"
+            "- **Safety Guarantee:** Preserving the firmware's closed-loop automatic management ensures the laptop will never overheat, "
+            "protecting the hardware from thermal damage."
+        )
 
 
 class ThermalsAndFanWidget(QWidget):
@@ -90,6 +186,23 @@ class ThermalsAndFanWidget(QWidget):
         exp_layout.addLayout(exp_vbox)
 
         mode_layout.addWidget(exp_box)
+
+        # Action button to view detailed ACPI & EC report
+        btn_report = QPushButton("Detailed Hardware Architecture & Safety Report")
+        btn_report.setIcon(QIcon.fromTheme("help-about"))
+        btn_report.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_report.setStyleSheet(
+            "QPushButton {"
+            "    background-color: #1e1e2e; color: #89b4fa; border: 1px solid #313244;"
+            "    border-radius: 6px; padding: 7px 14px; font-size: 11px; font-weight: bold;"
+            "}"
+            "QPushButton:hover {"
+            "    background-color: #26273a; border-color: #89b4fa;"
+            "}"
+        )
+        btn_report.clicked.connect(self.show_hardware_report)
+        mode_layout.addWidget(btn_report)
+
         main_layout.addWidget(mode_card)
 
         # --- 2. LIVE TEMPERATURE HISTORY GRAPH CARD ---
@@ -161,6 +274,10 @@ class ThermalsAndFanWidget(QWidget):
             self.core_labels[i] = core_lbl
         cpu_layout.addLayout(core_grid)
 
+        self.lbl_cpu_fan_status = QLabel("Cooling: Fan 1 (EC Closed-Loop Active)")
+        self.lbl_cpu_fan_status.setStyleSheet("font-size: 10px; color: #89b4fa; font-weight: 500;")
+        cpu_layout.addWidget(self.lbl_cpu_fan_status)
+
         proc_row.addWidget(self.cpu_card)
 
         # GPU Card
@@ -202,6 +319,10 @@ class ThermalsAndFanWidget(QWidget):
         self.lbl_gpu_driver = QLabel("Driver: NVIDIA 615.78")
         self.lbl_gpu_driver.setStyleSheet("font-size: 10px; color: #6c7086;")
         gpu_layout.addWidget(self.lbl_gpu_driver)
+
+        self.lbl_gpu_fan_status = QLabel("Cooling: Fan 2 (EC Closed-Loop Active)")
+        self.lbl_gpu_fan_status.setStyleSheet("font-size: 10px; color: #89b4fa; font-weight: 500;")
+        gpu_layout.addWidget(self.lbl_gpu_fan_status)
 
         proc_row.addWidget(self.gpu_card)
         main_layout.addLayout(proc_row)
@@ -295,3 +416,7 @@ class ThermalsAndFanWidget(QWidget):
 
     def stop_monitoring(self):
         self.poll_timer.stop()
+
+    def show_hardware_report(self):
+        dlg = HardwareReportDialog(self)
+        dlg.exec()

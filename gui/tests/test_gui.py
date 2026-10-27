@@ -154,5 +154,16 @@ class TestThermalGraph(unittest.TestCase):
         painter.end()
 
 
+class TestFanDashboard(unittest.TestCase):
+    def test_hardware_report_content(self):
+        """Verify hardware report markdown includes vital ACPI and EC details."""
+        from alg_rgb_gui.fan_dashboard import HardwareReportDialog
+        report = HardwareReportDialog._generate_report_markdown()
+        self.assertIn("Acer ALG AL15G-52", report)
+        self.assertIn("CLV0001:00", report)
+        self.assertIn("Embedded Controller", report)
+        self.assertIn("hwmon", report)
+
+
 if __name__ == "__main__":
     unittest.main()
