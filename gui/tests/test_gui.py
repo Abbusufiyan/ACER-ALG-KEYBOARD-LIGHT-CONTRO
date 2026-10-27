@@ -139,6 +139,20 @@ class TestThermalGraph(unittest.TestCase):
         self.assertEqual(graph.last_gpu, 50.0)
         self.assertEqual(len(graph.history), 30)
 
+    def test_graph_render(self):
+        """Verify graph renders cleanly without TypeError on drawText overloads."""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QImage, QPainter
+        app = QApplication.instance() or QApplication([])
+        graph = TemperatureHistoryGraph(max_points=30)
+        graph.resize(450, 160)
+        graph.add_sample(82.4, 55.7)
+
+        img = QImage(450, 160, QImage.Format.Format_ARGB32)
+        painter = QPainter(img)
+        graph.render(painter)
+        painter.end()
+
 
 if __name__ == "__main__":
     unittest.main()

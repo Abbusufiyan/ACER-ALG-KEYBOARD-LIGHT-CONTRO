@@ -29,8 +29,23 @@ class TemperatureHistoryGraph(QWidget):
         self.last_gpu: float = 40.0
 
     def add_sample(self, cpu_temp: float, gpu_temp: float):
-        self.last_cpu = max(20.0, min(115.0, cpu_temp))
-        self.last_gpu = max(20.0, min(115.0, gpu_temp)) if gpu_temp > 0 else 0.0
+        try:
+            c = float(cpu_temp)
+            if c != c:  # NaN check
+                c = self.last_cpu
+            self.last_cpu = max(20.0, min(115.0, c))
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            g = float(gpu_temp)
+            if g != g or g <= 0:
+                self.last_gpu = 0.0
+            else:
+                self.last_gpu = max(20.0, min(115.0, g))
+        except (TypeError, ValueError):
+            self.last_gpu = 0.0
+
         self.history.append((self.last_cpu, self.last_gpu))
         self.update()
 
@@ -79,7 +94,11 @@ class TemperatureHistoryGraph(QWidget):
             y_pos = temp_to_y(t_val)
             # Label on left
             painter.setPen(QColor(color_hex))
-            painter.drawText(QRectF(2, y_pos - 7, margin_left - 6, 14), Qt.AlignmentFlag.AlignRight, lbl_text)
+            painter.drawText(
+                QRectF(2.0, y_pos - 7.0, margin_left - 6.0, 14.0),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                lbl_text
+            )
 
             # Dashed grid line
             pen = QPen(QColor(color_hex))
@@ -90,9 +109,21 @@ class TemperatureHistoryGraph(QWidget):
 
         # 3. Time labels on bottom
         painter.setPen(QColor("#6c7086"))
-        painter.drawText(QRectF(margin_left, h - 16, 40, 14), Qt.AlignmentFlag.AlignLeft, "-60s")
-        painter.drawText(QRectF(margin_left + plot_w / 2 - 20, h - 16, 40, 14), Qt.AlignmentFlag.AlignCenter, "-30s")
-        painter.drawText(QRectF(margin_left + plot_w - 40, h - 16, 40, 14), Qt.AlignmentFlag.AlignRight, "Now")
+        painter.drawText(
+            QRectF(margin_left, h - 16.0, 40.0, 14.0),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            "-60s"
+        )
+        painter.drawText(
+            QRectF(margin_left + plot_w / 2.0 - 20.0, h - 16.0, 40.0, 14.0),
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
+            "-30s"
+        )
+        painter.drawText(
+            QRectF(margin_left + plot_w - 40.0, h - 16.0, 40.0, 14.0),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            "Now"
+        )
 
         # 4. Draw GPU Temperature Curve (Emerald)
         if any(g > 0 for _, g in self.history):
@@ -154,17 +185,27 @@ class TemperatureHistoryGraph(QWidget):
         # CPU Legend
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#38bdf8"))
-        painter.drawRoundedRect(QRectF(margin_left + 6, 6, 10, 10), 2, 2)
+        painter.drawRoundedRect(QRectF(margin_left + 6.0, 6.0, 10.0, 10.0), 2.0, 2.0)
         painter.setPen(QColor("#cdd6f4"))
-        painter.drawText(margin_left + 22, 15, f"CPU Package: {self.last_cpu:.0f}°C")
+        cpu_text = f"CPU Package: {self.last_cpu:.0f}°C" if self.last_cpu > 0 else "CPU Package: --°C"
+        painter.drawText(
+            QRectF(margin_left + 22.0, 4.0, 130.0, 14.0),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            cpu_text
+        )
 
         # GPU Legend
         if self.last_gpu > 0:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#a6e3a1"))
-            painter.drawRoundedRect(QRectF(margin_left + 150, 6, 10, 10), 2, 2)
+            painter.drawRoundedRect(QRectF(margin_left + 160.0, 6.0, 10.0, 10.0), 2.0, 2.0)
             painter.setPen(QColor("#cdd6f4"))
-            painter.drawText(margin_left + 166, 15, f"RTX 2050: {self.last_gpu:.0f}°C")
+            gpu_text = f"RTX 2050: {self.last_gpu:.0f}°C"
+            painter.drawText(
+                QRectF(margin_left + 176.0, 4.0, 130.0, 14.0),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                gpu_text
+            )
 
         # Live dot indicator on current points
         if cpu_points:

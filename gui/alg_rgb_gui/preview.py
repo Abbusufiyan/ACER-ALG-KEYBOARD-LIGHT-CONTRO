@@ -169,6 +169,10 @@ class KeyboardPreviewWidget(QWidget):
         # Bottom-left: Model & Hardware note
         painter.setFont(QFont("Noto Sans", 8))
         painter.setPen(QColor("#585b70"))
-        painter.drawText(26, h - 14, "Acer ALG AL15G-52 • Software Preview")
+        painter.drawText(
+            QRectF(26.0, float(h - 22), float(w - 52), 16.0),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            "Acer ALG AL15G-52 • Software Preview"
+        )
 
         painter.end()
