@@ -15,6 +15,9 @@ modules.order
 
 # CLI build artifacts
 alg-rgb
+alg-fan
+cli/alg-rgb
+cli/alg-fan
 
 # Editors
 .vscode/

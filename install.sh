@@ -2,23 +2,24 @@
 
 set -e
 
-VERSION="0.1.3"
+VERSION="0.1.4"
 DKMS_NAME="alg-rgb"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "[*] Building CLI..."
+echo "[*] Building CLI utilities (alg-rgb & alg-fan)..."
 make -C "${SCRIPT_DIR}/cli"
 
 echo "[*] Pre-flight: Verifying kernel module compiles cleanly before touching DKMS..."
 make -C "${SCRIPT_DIR}/kernel"
 make -C "${SCRIPT_DIR}/kernel" clean
 
-echo "[*] Installing CLI to /usr/local/bin..."
+echo "[*] Installing CLI utilities to /usr/local/bin..."
 sudo install -Dm755 "${SCRIPT_DIR}/cli/alg-rgb" /usr/local/bin/alg-rgb
+sudo install -Dm755 "${SCRIPT_DIR}/cli/alg-fan" /usr/local/bin/alg-fan
 
-echo "[*] Setting up udev rules..."
+echo "[*] Setting up udev rules for RGB and Fan interfaces..."
 sudo install -Dm644 -o root -g root /dev/null /etc/udev/rules.d/99-alg-rgb.rules 2>/dev/null || true
-echo 'KERNEL=="alg_rgb", SUBSYSTEM=="alg", GROUP="alg-rgb", MODE="0660"' | sudo tee /etc/udev/rules.d/99-alg-rgb.rules >/dev/null
+echo 'KERNEL=="alg_*", SUBSYSTEM=="alg", GROUP="alg-rgb", MODE="0660"' | sudo tee /etc/udev/rules.d/99-alg-rgb.rules >/dev/null
 
 echo "[*] Ensuring alg-rgb group exists..."
 getent group alg-rgb >/dev/null || sudo groupadd -r alg-rgb

@@ -2,7 +2,7 @@
 
 set -e
 
-VERSION="0.1.3"
+VERSION="0.1.4"
 DKMS_NAME="alg-rgb"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -20,8 +20,8 @@ echo "[*] Removing udev rules..."
 sudo rm -f /etc/udev/rules.d/99-alg-rgb.rules
 sudo udevadm control --reload-rules 2>/dev/null || true
 
-echo "[*] Removing CLI binary..."
-sudo rm -f /usr/local/bin/alg-rgb
+echo "[*] Removing CLI binaries..."
+sudo rm -f /usr/local/bin/alg-rgb /usr/local/bin/alg-fan
 
 echo "[*] Removing DKMS module for version ${VERSION}..."
 sudo dkms remove -m ${DKMS_NAME} -v ${VERSION} --all 2>/dev/null || true

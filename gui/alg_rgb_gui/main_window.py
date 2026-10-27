@@ -737,5 +737,11 @@ class AcerAlgRgbWindow(QMainWindow):
     def force_quit(self):
         self.diag_timer.stop()
         self.apply_timer.stop()
-        self.fan_widget.stop_monitoring()
+        if hasattr(self, "fan_widget"):
+            try:
+                from .fan_controller import FanMode
+                self.fan_widget.fan_controller.set_mode(FanMode.AUTO)
+                self.fan_widget.stop_monitoring()
+            except Exception:
+                pass
         QApplication.quit()

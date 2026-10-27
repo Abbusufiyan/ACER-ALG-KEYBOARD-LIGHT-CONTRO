@@ -53,35 +53,32 @@
  *         CC FF 00 F0
  *
  * ---------------------------------------------------------------------------
- * SAFETY
+ * SAFETY & HARDWARE SEPARATION
  * ---------------------------------------------------------------------------
  *
- * This driver intentionally uses ONLY the known-safe command:
+ * This driver isolates keyboard lighting and fan control into separate
+ * character device interfaces to prevent command collisions:
  *
- *     Function 0x67
- *
- * Other ACPI functions discovered during reverse engineering
- * (0x68, 0x69, 0x6A, etc.) are NOT used.
- *
- * One experimental command was observed to hard-freeze the machine.
+ *     /dev/alg_rgb -> ACPI Function 0x67 (RGB Keyboard Backlight)
+ *     /dev/alg_fan -> ACPI Functions 0x68 & 0x69 (Dual Fan Speed Control)
  *
  * ---------------------------------------------------------------------------
  * USERSPACE API
  * ---------------------------------------------------------------------------
  *
- * The driver creates:
- *
- *     /dev/alg_rgb
- *
- * Example usage:
- *
+ * 1. Keyboard RGB Lighting (/dev/alg_rgb):
  *     echo red    > /dev/alg_rgb
  *     echo green  > /dev/alg_rgb
  *     echo blue   > /dev/alg_rgb
- *     echo yellow > /dev/alg_rgb
- *     echo white  > /dev/alg_rgb
+ *     echo off    > /dev/alg_rgb
  *
- * Colors are validated inside the kernel.
+ * 2. Fan Speed Control (/dev/alg_fan):
+ *     echo auto        > /dev/alg_fan  (Restore firmware closed-loop control)
+ *     echo 50 50       > /dev/alg_fan  (Set Fan 1 to 50%, Fan 2 to 50%)
+ *     echo manual 70 80> /dev/alg_fan  (Set Fan 1 to 70%, Fan 2 to 80%)
+ *
+ * All inputs are validated and clamped in kernel space. Minimum duty is
+ * clamped to 25% (raw 64) to prevent motor stall and heat buildup.
  *
  * ---------------------------------------------------------------------------
  */
@@ -97,27 +94,26 @@
 #include "../include/version.h"
 
 #define DEVICE_NAME "alg_rgb"
+#define FAN_DEVICE_NAME "alg_fan"
 #define CLASS_NAME "alg"
 
 /*
- * Character device major number.
- *
+ * Character device major numbers.
  * Assigned dynamically during module load.
  */
 static int major;
+static int major_fan;
 
 /*
  * Device class used to create:
- *
  *     /dev/alg_rgb
+ *     /dev/alg_fan
  */
 static struct class *alg_class;
 
 /*
  * Handle to:
- *
  *     \_SB.DCHU
- *
  * The CLV0001 ACPI device.
  */
 static acpi_handle dchu_handle;
@@ -128,6 +124,12 @@ static int last_acpi_status = ALG_STATUS_UNTESTED;
 static char last_applied_color[32] = "none";
 static int last_applied_brightness = -1;
 static bool backlight_is_on = false;
+
+/* Fan state tracking */
+static int last_fan_acpi_status = ALG_STATUS_UNTESTED;
+static bool fan_manual_active = false;
+static u8 last_fan1_duty = 0; // CPU
+static u8 last_fan2_duty = 0; // GPU
 
 
 
@@ -502,12 +504,293 @@ static ssize_t alg_write(
 }
 
 /*
- * Character device operations.
+ * Character device operations for RGB.
  */
 static const struct file_operations fops = {
     .owner = THIS_MODULE,
     .read = alg_read,
     .write = alg_write,
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * FAN CONTROL SUBSYSTEM (Functions 0x68 & 0x69)
+ * ---------------------------------------------------------------------------
+ */
+
+static int send_fan_auto(void)
+{
+    union acpi_object *out;
+    u8 auto_buf[4] = { 0x03, 0x00, 0x00, 0x00 }; /* bitmask 0x03 restores fan 1 and 2 to auto */
+    union acpi_object buf_obj;
+    union acpi_object pkg_obj;
+    union acpi_object pkg_elements[1];
+    int ret = 0;
+
+    if (!dchu_handle) {
+        last_fan_acpi_status = -ENODEV;
+        return -ENODEV;
+    }
+
+    buf_obj.type = ACPI_TYPE_BUFFER;
+    buf_obj.buffer.length = sizeof(auto_buf);
+    buf_obj.buffer.pointer = auto_buf;
+
+    pkg_elements[0] = buf_obj;
+
+    pkg_obj.type = ACPI_TYPE_PACKAGE;
+    pkg_obj.package.count = 1;
+    pkg_obj.package.elements = pkg_elements;
+
+    out = acpi_evaluate_dsm(
+        dchu_handle,
+        &rgb_guid,
+        0,
+        0x69,
+        &pkg_obj);
+
+    if (!out) {
+        pr_err_ratelimited("alg-fan: ACPI _DSM evaluate failed for auto restore (func 0x69)\n");
+        last_fan_acpi_status = -EIO;
+        return -EIO;
+    }
+
+    if (out->type == ACPI_TYPE_INTEGER) {
+        if (out->integer.value == 0x80000002) {
+            pr_err_ratelimited("alg-fan: ACPI _DSM returned unsupported (0x80000002)\n");
+            ret = -EOPNOTSUPP;
+        } else if (out->integer.value != 0x69) {
+            pr_warn_ratelimited("alg-fan: ACPI _DSM returned unexpected status 0x%llx for func 0x69\n",
+                                (unsigned long long)out->integer.value);
+            ret = -EPROTO;
+        } else {
+            ret = 0;
+        }
+    } else {
+        pr_err_ratelimited("alg-fan: ACPI _DSM returned non-integer type %d\n", out->type);
+        ret = -EBADMSG;
+    }
+
+    ACPI_FREE(out);
+    last_fan_acpi_status = ret;
+    if (ret == 0) {
+        fan_manual_active = false;
+        last_fan1_duty = 0;
+        last_fan2_duty = 0;
+        pr_info("alg-fan: restored firmware automatic fan control (SCMD 0x69)\n");
+    }
+    return ret;
+}
+
+static int send_fan_duty(u8 cpu_raw, u8 gpu_raw)
+{
+    union acpi_object *out;
+    u8 duty_buf[4];
+    union acpi_object buf_obj;
+    union acpi_object pkg_obj;
+    union acpi_object pkg_elements[1];
+    int ret = 0;
+
+    if (!dchu_handle) {
+        last_fan_acpi_status = -ENODEV;
+        return -ENODEV;
+    }
+
+    /* Enforce safety floor: minimum 25% (raw 64) to prevent stall */
+    if (cpu_raw < 64)
+        cpu_raw = 64;
+    if (gpu_raw < 64)
+        gpu_raw = 64;
+
+    duty_buf[0] = cpu_raw; /* Fan 1 (CPU) */
+    duty_buf[1] = gpu_raw; /* Fan 2 (GPU) */
+    duty_buf[2] = 0x00;
+    duty_buf[3] = 0x00;
+
+    buf_obj.type = ACPI_TYPE_BUFFER;
+    buf_obj.buffer.length = sizeof(duty_buf);
+    buf_obj.buffer.pointer = duty_buf;
+
+    pkg_elements[0] = buf_obj;
+
+    pkg_obj.type = ACPI_TYPE_PACKAGE;
+    pkg_obj.package.count = 1;
+    pkg_obj.package.elements = pkg_elements;
+
+    out = acpi_evaluate_dsm(
+        dchu_handle,
+        &rgb_guid,
+        0,
+        0x68,
+        &pkg_obj);
+
+    if (!out) {
+        pr_err_ratelimited("alg-fan: ACPI _DSM evaluate failed for manual duty (func 0x68)\n");
+        last_fan_acpi_status = -EIO;
+        return -EIO;
+    }
+
+    if (out->type == ACPI_TYPE_INTEGER) {
+        if (out->integer.value == 0x80000002) {
+            pr_err_ratelimited("alg-fan: ACPI _DSM returned unsupported (0x80000002)\n");
+            ret = -EOPNOTSUPP;
+        } else if (out->integer.value != 0x68) {
+            pr_warn_ratelimited("alg-fan: ACPI _DSM returned unexpected status 0x%llx for func 0x68\n",
+                                (unsigned long long)out->integer.value);
+            ret = -EPROTO;
+        } else {
+            ret = 0;
+        }
+    } else {
+        pr_err_ratelimited("alg-fan: ACPI _DSM returned non-integer type %d\n", out->type);
+        ret = -EBADMSG;
+    }
+
+    ACPI_FREE(out);
+    last_fan_acpi_status = ret;
+    if (ret == 0) {
+        fan_manual_active = true;
+        last_fan1_duty = cpu_raw;
+        last_fan2_duty = gpu_raw;
+        pr_info("alg-fan: applied manual duty CPU=%u%% (raw %u), GPU=%u%% (raw %u)\n",
+                (unsigned int)((cpu_raw * 100 + 127) / 255), cpu_raw,
+                (unsigned int)((gpu_raw * 100 + 127) / 255), gpu_raw);
+    }
+    return ret;
+}
+
+/*
+ * Diagnostic read handler for /dev/alg_fan
+ */
+static ssize_t alg_fan_read(
+    struct file *file,
+    char __user *buf,
+    size_t count,
+    loff_t *ppos)
+{
+    char diag_buf[512];
+    const char *status_str;
+    int len;
+
+    if (last_fan_acpi_status == ALG_STATUS_UNTESTED)
+        status_str = "UNTESTED (no ACPI fan commands issued yet)";
+    else if (last_fan_acpi_status == 0)
+        status_str = "SUCCESS (firmware accepted last fan call)";
+    else if (last_fan_acpi_status == -EOPNOTSUPP)
+        status_str = "UNSUPPORTED (firmware returned 0x80000002)";
+    else if (last_fan_acpi_status == -EPROTO)
+        status_str = "PROTOCOL_ERROR (unexpected integer return value)";
+    else if (last_fan_acpi_status == -EBADMSG)
+        status_str = "BAD_MESSAGE (firmware returned non-integer object)";
+    else if (last_fan_acpi_status == -EIO)
+        status_str = "IO_ERROR (acpi_evaluate_dsm returned NULL)";
+    else
+        status_str = "FAILED";
+
+    len = scnprintf(diag_buf, sizeof(diag_buf),
+        "driver_version: %s\n"
+        "acpi_device: \\_SB.DCHU (CLV0001)\n"
+        "acpi_handle_bound: %s\n"
+        "last_acpi_status: %d (%s)\n"
+        "fan_mode: %s\n"
+        "fan1_cpu_duty_pct: %u\n"
+        "fan1_cpu_duty_raw: %u\n"
+        "fan2_gpu_duty_pct: %u\n"
+        "fan2_gpu_duty_raw: %u\n",
+        ALG_RGB_VERSION_STRING,
+        dchu_handle ? "yes" : "no",
+        last_fan_acpi_status,
+        status_str,
+        fan_manual_active ? "MANUAL" : "AUTO",
+        fan_manual_active ? (unsigned int)((last_fan1_duty * 100 + 127) / 255) : 0,
+        last_fan1_duty,
+        fan_manual_active ? (unsigned int)((last_fan2_duty * 100 + 127) / 255) : 0,
+        last_fan2_duty);
+
+    return simple_read_from_buffer(buf, count, ppos, diag_buf, len);
+}
+
+/*
+ * Write handler for /dev/alg_fan
+ *
+ * Supported commands:
+ *   auto
+ *   <cpu_pct> <gpu_pct>       (e.g. "50 50")
+ *   manual <cpu_pct> <gpu_pct>(e.g. "manual 60 70")
+ *   set <cpu_pct> <gpu_pct>   (e.g. "set 80 80")
+ */
+static ssize_t alg_fan_write(
+    struct file *file,
+    const char __user *buf,
+    size_t len,
+    loff_t *off)
+{
+    char kbuf[64];
+    int cpu_val = 0;
+    int gpu_val = 0;
+    u8 cpu_raw = 64;
+    u8 gpu_raw = 64;
+    char prefix[32];
+    int parsed;
+    int ret;
+
+    if (len == 0 || len >= sizeof(kbuf))
+        return -EINVAL;
+
+    if (copy_from_user(kbuf, buf, len))
+        return -EFAULT;
+
+    kbuf[len] = '\0';
+    strim(kbuf);
+
+    if (kbuf[0] == '\0')
+        return -EINVAL;
+
+    /* 1. Auto restore command */
+    if (!strcmp(kbuf, "auto") || !strcmp(kbuf, "restore") || !strcmp(kbuf, "reset")) {
+        ret = send_fan_auto();
+        if (ret < 0)
+            return ret;
+        return len;
+    }
+
+    /* 2. Manual duty commands */
+    parsed = sscanf(kbuf, "%d %d", &cpu_val, &gpu_val);
+    if (parsed == 2) {
+        goto apply_duty;
+    }
+
+    parsed = sscanf(kbuf, "%31s %d %d", prefix, &cpu_val, &gpu_val);
+    if (parsed == 3 && (!strcmp(prefix, "manual") || !strcmp(prefix, "set") || !strcmp(prefix, "duty"))) {
+        goto apply_duty;
+    }
+
+    pr_err_ratelimited("alg-fan: unrecognized command '%s'\n", kbuf);
+    return -EINVAL;
+
+apply_duty:
+    /* Convert percentage or raw value to 8-bit raw duty (clamp 25% - 100%) */
+    if (cpu_val <= 100)
+        cpu_raw = (u8)clamp((cpu_val * 255 + 50) / 100, 64, 255);
+    else
+        cpu_raw = (u8)clamp(cpu_val, 64, 255);
+
+    if (gpu_val <= 100)
+        gpu_raw = (u8)clamp((gpu_val * 255 + 50) / 100, 64, 255);
+    else
+        gpu_raw = (u8)clamp(gpu_val, 64, 255);
+
+    ret = send_fan_duty(cpu_raw, gpu_raw);
+    if (ret < 0)
+        return ret;
+
+    return len;
+}
+
+static const struct file_operations fan_fops = {
+    .owner = THIS_MODULE,
+    .read = alg_fan_read,
+    .write = alg_fan_write,
 };
 
 /*
@@ -517,10 +800,10 @@ static int __init alg_init(void)
 {
     acpi_status status;
     struct device *dev;
+    struct device *fan_dev;
 
     pr_info("alg-rgb: loading\n");
-    pr_info("alg-rgb v%s loaded\n", ALG_RGB_VERSION_STRING);
-
+    pr_info("alg-rgb v%s loaded (RGB & Fan interfaces)\n", ALG_RGB_VERSION_STRING);
 
     status = acpi_get_handle(
         NULL,
@@ -533,6 +816,7 @@ static int __init alg_init(void)
         return -ENODEV;
     }
 
+    /* Register RGB char device */
     major = register_chrdev(
         0,
         DEVICE_NAME,
@@ -540,17 +824,32 @@ static int __init alg_init(void)
 
     if (major < 0)
     {
-        pr_err("alg-rgb: failed to register char device\n");
+        pr_err("alg-rgb: failed to register RGB char device\n");
         return major;
+    }
+
+    /* Register Fan char device */
+    major_fan = register_chrdev(
+        0,
+        FAN_DEVICE_NAME,
+        &fan_fops);
+
+    if (major_fan < 0)
+    {
+        pr_err("alg-rgb: failed to register Fan char device\n");
+        unregister_chrdev(major, DEVICE_NAME);
+        return major_fan;
     }
 
     alg_class = class_create(CLASS_NAME);
     if (IS_ERR(alg_class))
     {
+        unregister_chrdev(major_fan, FAN_DEVICE_NAME);
         unregister_chrdev(major, DEVICE_NAME);
         return PTR_ERR(alg_class);
     }
 
+    /* Create /dev/alg_rgb */
     dev = device_create(
         alg_class,
         NULL,
@@ -561,25 +860,56 @@ static int __init alg_init(void)
     if (IS_ERR(dev))
     {
         class_destroy(alg_class);
+        unregister_chrdev(major_fan, FAN_DEVICE_NAME);
         unregister_chrdev(major, DEVICE_NAME);
         return PTR_ERR(dev);
     }
 
-    pr_info("alg-rgb: loaded successfully (device available at /dev/%s)\n", DEVICE_NAME);
+    /* Create /dev/alg_fan */
+    fan_dev = device_create(
+        alg_class,
+        NULL,
+        MKDEV(major_fan, 0),
+        NULL,
+        FAN_DEVICE_NAME);
+
+    if (IS_ERR(fan_dev))
+    {
+        device_destroy(alg_class, MKDEV(major, 0));
+        class_destroy(alg_class);
+        unregister_chrdev(major_fan, FAN_DEVICE_NAME);
+        unregister_chrdev(major, DEVICE_NAME);
+        return PTR_ERR(fan_dev);
+    }
+
+    pr_info("alg-rgb: loaded successfully (/dev/%s and /dev/%s available)\n",
+            DEVICE_NAME, FAN_DEVICE_NAME);
     return 0;
 }
-
 
 /*
  * Module cleanup.
  */
 static void __exit alg_exit(void)
 {
+    /* Safety: if manual mode was active, restore firmware automatic control */
+    if (fan_manual_active) {
+        send_fan_auto();
+    }
+
+    device_destroy(
+        alg_class,
+        MKDEV(major_fan, 0));
+
     device_destroy(
         alg_class,
         MKDEV(major, 0));
 
     class_destroy(alg_class);
+
+    unregister_chrdev(
+        major_fan,
+        FAN_DEVICE_NAME);
 
     unregister_chrdev(
         major,
@@ -588,11 +918,10 @@ static void __exit alg_exit(void)
     pr_info("alg-rgb: unloaded\n");
 }
 
-
 module_init(alg_init);
 module_exit(alg_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Kaushik Sarkar");
-MODULE_DESCRIPTION("ALG RGB Driver for Acer CLV0001 keyboards");
+MODULE_DESCRIPTION("ALG RGB and Fan Driver for Acer CLV0001 hardware");
 MODULE_VERSION(ALG_RGB_VERSION_STRING);

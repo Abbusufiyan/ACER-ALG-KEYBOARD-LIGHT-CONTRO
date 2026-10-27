@@ -13,9 +13,27 @@ Hardware Actuation Safety Gate:
   Direct ACPI hardware writes remain gated until explicit user approval.
 """
 
+import os
+import shutil
+import subprocess
 import math
 from enum import Enum
 from typing import Dict, Any, List, Tuple, Optional
+
+DEV_FAN_PATH = "/dev/alg_fan"
+
+
+def find_fan_cli_path() -> Optional[str]:
+    """Locate the alg-fan CLI utility."""
+    if os.path.isfile("/usr/local/bin/alg-fan") and os.access("/usr/local/bin/alg-fan", os.X_OK):
+        return "/usr/local/bin/alg-fan"
+    which_path = shutil.which("alg-fan")
+    if which_path and os.access(which_path, os.X_OK):
+        return which_path
+    local_path = os.path.expanduser("~/alg-cli/cli/alg-fan")
+    if os.path.isfile(local_path) and os.access(local_path, os.X_OK):
+        return local_path
+    return None
 
 
 class FanMode(Enum):
@@ -103,19 +121,27 @@ def interpolate_curve(curve: List[Tuple[float, int]], current_temp: float) -> in
 class FanHardwareBackend:
     r"""
     ACPI Dispatcher Abstraction for Acer ALG AL15G-52.
+    Communicates with /dev/alg_fan or alg-fan CLI.
     
     ACPI Contract (DSDT \_SB.DCHU._DSM UUID 93f224e4-fbdc-4bbf-add6-db71bdc0afad):
       - Function 0x68 (Manual Duty): Package { Buffer { duty1, duty2, 0, 0 } }
       - Function 0x69 (Auto Restore): Package { Buffer { bitmask, 0, 0, 0 } } (0x03 = both fans)
     """
 
-    def __init__(self, hardware_writes_enabled: bool = False):
+    def __init__(self, hardware_writes_enabled: bool = True):
         self.hardware_writes_enabled = hardware_writes_enabled
-        self.device_path = "/dev/alg_rgb"
+        self.device_path = DEV_FAN_PATH
         self.last_commanded_cpu_raw = 0
         self.last_commanded_gpu_raw = 0
         self.last_commanded_mode = "auto"
         self.call_history: List[Dict[str, Any]] = []
+
+    def is_hardware_available(self) -> bool:
+        """Check if physical ACPI fan interface is accessible."""
+        if os.path.exists(self.device_path) and os.access(self.device_path, os.W_OK):
+            return True
+        cli = find_fan_cli_path()
+        return cli is not None
 
     def apply_manual_duty(self, cpu_pct: int, gpu_pct: int) -> Tuple[bool, str]:
         """Apply manual duty cycles to CPU Fan 1 and GPU Fan 2."""
@@ -145,11 +171,29 @@ class FanHardwareBackend:
                 f"Raw payload [{cpu_raw}, {gpu_raw}, 0, 0] ready for SCMD 0x68."
             )
 
-        # Hardware execution path: blocked in Phase 2 until user approves Phase 3
-        return (
-            False,
-            "Hardware writes disabled: Phase 3 kernel driver fan interface (SCMD 0x68/0x69) awaiting approval."
-        )
+        # 1. Direct device node actuation (/dev/alg_fan)
+        if os.path.exists(self.device_path):
+            try:
+                with open(self.device_path, "w", encoding="utf-8") as f:
+                    f.write(f"{cpu_clamped} {gpu_clamped}\n")
+                return True, f"Hardware Applied: CPU {cpu_clamped}% (raw {cpu_raw}), GPU {gpu_clamped}% (raw {gpu_raw}) via SCMD 0x68"
+            except PermissionError:
+                return False, f"Permission denied writing to {self.device_path}. Ensure user is in 'alg-rgb' group."
+            except Exception as e:
+                return False, f"Error writing to {self.device_path}: {e}"
+
+        # 2. CLI fallback actuation (alg-fan)
+        cli = find_fan_cli_path()
+        if cli:
+            try:
+                proc = subprocess.run([cli, str(cpu_clamped), str(gpu_clamped)], capture_output=True, text=True, timeout=2.0)
+                if proc.returncode == 0:
+                    return True, f"Applied via CLI: CPU {cpu_clamped}%, GPU {gpu_clamped}%"
+                return False, proc.stderr.strip() or f"CLI returned code {proc.returncode}"
+            except Exception as e:
+                return False, f"CLI execution error: {e}"
+
+        return False, f"Kernel interface {self.device_path} not found. Run 'sudo ./install.sh' to load driver."
 
     def apply_auto_mode(self) -> Tuple[bool, str]:
         """Restore autonomous firmware closed-loop control on both fans."""
@@ -163,10 +207,49 @@ class FanHardwareBackend:
         if not self.hardware_writes_enabled:
             return True, "Safety-Gated: Firmware Automatic mode active (EC closed loop). Payload [0x03, 0, 0, 0] ready for SCMD 0x69."
 
-        return (
-            False,
-            "Hardware writes disabled: Phase 3 kernel driver fan interface (SCMD 0x68/0x69) awaiting approval."
-        )
+        # 1. Direct device node actuation (/dev/alg_fan)
+        if os.path.exists(self.device_path):
+            try:
+                with open(self.device_path, "w", encoding="utf-8") as f:
+                    f.write("auto\n")
+                return True, "Restored firmware automatic fan control (SCMD 0x69)"
+            except PermissionError:
+                return False, f"Permission denied writing to {self.device_path}. Ensure user is in 'alg-rgb' group."
+            except Exception as e:
+                return False, f"Error writing to {self.device_path}: {e}"
+
+        # 2. CLI fallback actuation
+        cli = find_fan_cli_path()
+        if cli:
+            try:
+                proc = subprocess.run([cli, "auto"], capture_output=True, text=True, timeout=2.0)
+                if proc.returncode == 0:
+                    return True, "Restored firmware automatic fan control (SCMD 0x69)"
+                return False, proc.stderr.strip() or f"CLI returned code {proc.returncode}"
+            except Exception as e:
+                return False, f"CLI execution error: {e}"
+
+        return False, f"Kernel interface {self.device_path} not found. Run 'sudo ./install.sh' to load driver."
+
+    def read_driver_diagnostics(self) -> Dict[str, Any]:
+        """Read diagnostic status from /dev/alg_fan."""
+        data = {
+            "device_exists": os.path.exists(self.device_path),
+            "device_writable": os.access(self.device_path, os.W_OK) if os.path.exists(self.device_path) else False,
+            "fan_mode": self.last_commanded_mode,
+            "last_acpi_status": "N/A"
+        }
+        if os.path.exists(self.device_path):
+            try:
+                with open(self.device_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if ":" in line:
+                            k, v = line.split(":", 1)
+                            data[k.strip()] = v.strip()
+            except Exception:
+                pass
+        return data
 
     def get_status(self) -> Dict[str, Any]:
         return {
@@ -184,7 +267,7 @@ class FanControllerEngine:
     """
 
     def __init__(self, backend: Optional[FanHardwareBackend] = None):
-        self.backend = backend or FanHardwareBackend(hardware_writes_enabled=False)
+        self.backend = backend or FanHardwareBackend(hardware_writes_enabled=True)
         self.current_mode = FanMode.AUTO
         self.custom_cpu_duty = 50
         self.custom_gpu_duty = 50

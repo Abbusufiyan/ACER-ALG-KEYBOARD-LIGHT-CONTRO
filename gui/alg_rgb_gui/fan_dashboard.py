@@ -135,7 +135,7 @@ class ThermalsAndFanWidget(QWidget):
         super().__init__(parent)
         self.sensor_engine = SensorEngine()
         self.config = config or getattr(parent, "config", None) or ConfigManager()
-        self.fan_controller = FanControllerEngine(FanHardwareBackend(hardware_writes_enabled=False))
+        self.fan_controller = FanControllerEngine(FanHardwareBackend(hardware_writes_enabled=True))
 
         # Internal flag to prevent recursive slider synchronization loops
         self._syncing_sliders = False
@@ -203,7 +203,7 @@ class ThermalsAndFanWidget(QWidget):
         mode_header.addWidget(m_title)
         mode_header.addStretch()
 
-        self.lbl_safety_pill = QLabel("🔒 SAFETY GATED (PHASE 2)")
+        self.lbl_safety_pill = QLabel("🔒 HARDWARE STATUS")
         self.lbl_safety_pill.setStyleSheet(
             "background-color: #332b1a; color: #f9e2af; "
             "border: 1px solid #f59e0b; border-radius: 6px; "
@@ -236,17 +236,16 @@ class ThermalsAndFanWidget(QWidget):
 
         exp_vbox = QVBoxLayout()
         exp_vbox.setSpacing(3)
-        exp_title = QLabel("Non-Destructive Simulation & Safety Gate Active")
-        exp_title.setStyleSheet("font-weight: bold; color: #cdd6f4; font-size: 12px;")
-        exp_desc = QLabel(
-            "Fan control profiles and independent CPU/GPU duty targets are simulated and verified "
-            "against DSDT SCMD 0x68/0x69 contracts. ACPI bus hardware writes remain safely gated "
-            "until explicit user approval for Phase 3."
+        self.exp_title = QLabel("ACPI Dual-Fan Hardware Interface")
+        self.exp_title.setStyleSheet("font-weight: bold; color: #cdd6f4; font-size: 12px;")
+        self.exp_desc = QLabel(
+            "Fan control profiles and independent CPU/GPU duty targets are mapped to DSDT SCMD 0x68/0x69. "
+            "Thermal curves and safety clamps protect hardware against stalling."
         )
-        exp_desc.setWordWrap(True)
-        exp_desc.setStyleSheet("font-size: 11px; color: #a6adc8;")
-        exp_vbox.addWidget(exp_title)
-        exp_vbox.addWidget(exp_desc)
+        self.exp_desc.setWordWrap(True)
+        self.exp_desc.setStyleSheet("font-size: 11px; color: #a6adc8;")
+        exp_vbox.addWidget(self.exp_title)
+        exp_vbox.addWidget(self.exp_desc)
         exp_layout.addLayout(exp_vbox)
 
         btn_report = QPushButton("Hardware Report")
@@ -263,6 +262,7 @@ class ThermalsAndFanWidget(QWidget):
         exp_layout.addWidget(btn_report)
 
         mode_layout.addWidget(exp_box)
+        self._refresh_hardware_status()
 
         # 5 Fan Mode Selection Buttons
         modes_row = QHBoxLayout()
@@ -847,6 +847,36 @@ class ThermalsAndFanWidget(QWidget):
             self.aux_acpi_lbl.setText(f"🌡️ ACPI Board: {aux['ACPI Motherboard']:.0f}°C")
         if "Wi-Fi Module" in aux:
             self.aux_wifi_lbl.setText(f"📶 Wi-Fi: {aux['Wi-Fi Module']:.0f}°C")
+
+        # 6. Periodic hardware connection check
+        self._refresh_hardware_status()
+
+    def _refresh_hardware_status(self):
+        hw_avail = self.fan_controller.backend.is_hardware_available()
+        if hw_avail:
+            self.lbl_safety_pill.setText("⚡ HARDWARE CONNECTED")
+            self.lbl_safety_pill.setStyleSheet(
+                "background-color: #1e3a2f; color: #a6e3a1; "
+                "border: 1px solid #10b981; border-radius: 6px; "
+                "padding: 3px 10px; font-size: 10px; font-weight: bold;"
+            )
+            self.exp_title.setText("ACPI Dual-Fan Hardware Interface (/dev/alg_fan) Active")
+            self.exp_desc.setText(
+                "The kernel driver provides direct ACPI hardware actuation for CPU Fan 1 and GPU Fan 2 "
+                "using verified firmware methods SCMD 0x68 (manual duty) and SCMD 0x69 (auto restore)."
+            )
+        else:
+            self.lbl_safety_pill.setText("🔒 DRIVER UPDATE PENDING")
+            self.lbl_safety_pill.setStyleSheet(
+                "background-color: #332b1a; color: #f9e2af; "
+                "border: 1px solid #f59e0b; border-radius: 6px; "
+                "padding: 3px 10px; font-size: 10px; font-weight: bold;"
+            )
+            self.exp_title.setText("Kernel Device /dev/alg_fan Not Yet Loaded")
+            self.exp_desc.setText(
+                "Hardware control interface (/dev/alg_fan) is ready. Run 'sudo ./install.sh' to compile and "
+                "load the updated DKMS module. UI simulation and safety curves remain active."
+            )
 
     def stop_monitoring(self):
         self.poll_timer.stop()

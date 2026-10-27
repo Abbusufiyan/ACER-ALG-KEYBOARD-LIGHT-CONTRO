@@ -10,6 +10,7 @@ import os
 # Check multiple possible locations for alg_rgb_gui package:
 possible_paths = [
     os.path.dirname(os.path.realpath(__file__)),
+    os.path.expanduser("~/.local/share/alg-rgb-gui"),
     "/usr/local/share/alg-rgb-gui",
     os.path.expanduser("~/alg-cli/gui")
 ]

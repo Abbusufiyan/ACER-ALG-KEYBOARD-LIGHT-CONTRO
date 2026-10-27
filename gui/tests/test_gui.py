@@ -243,8 +243,16 @@ class TestFanController(unittest.TestCase):
         # Above max threshold (88C -> 100%)
         self.assertEqual(interpolate_curve(BALANCED_CURVE, 95.0), 100)
 
+    def test_find_fan_cli_path(self):
+        """Verify locating the alg-fan CLI binary."""
+        from alg_rgb_gui.fan_controller import find_fan_cli_path
+        cli = find_fan_cli_path()
+        self.assertIsNotNone(cli, "alg-fan CLI should be located in cli/ or PATH")
+        self.assertTrue(os.path.isfile(cli))
+        self.assertTrue(os.access(cli, os.X_OK))
+
     def test_hardware_backend_safety_gate(self):
-        """Verify hardware writes remain gated and log calls in Phase 2."""
+        """Verify hardware writes remain gated and log calls in simulation mode."""
         from alg_rgb_gui.fan_controller import FanHardwareBackend
         backend = FanHardwareBackend(hardware_writes_enabled=False)
         self.assertFalse(backend.hardware_writes_enabled)
@@ -262,6 +270,31 @@ class TestFanController(unittest.TestCase):
         self.assertIn("Safety-Gated", msg)
         self.assertIn("SCMD 0x69", msg)
         self.assertEqual(len(backend.call_history), 2)
+
+    def test_hardware_backend_device_file_io(self):
+        """Verify real actuation writes formatted commands to device node."""
+        from alg_rgb_gui.fan_controller import FanHardwareBackend
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as tmp:
+            backend = FanHardwareBackend(hardware_writes_enabled=True)
+            backend.device_path = tmp.name
+
+            # Test manual duty write
+            ok, msg = backend.apply_manual_duty(50, 75)
+            self.assertTrue(ok)
+            self.assertIn("Hardware Applied", msg)
+            tmp.seek(0)
+            content = tmp.read()
+            self.assertIn("50 75", content)
+
+            # Test auto restore write
+            ok, msg = backend.apply_auto_mode()
+            self.assertTrue(ok)
+            self.assertIn("Restored firmware automatic", msg)
+            tmp.seek(0)
+            content = tmp.read()
+            self.assertIn("auto", content)
 
     def test_engine_independent_and_synced_duty(self):
         """Test engine independent CPU/GPU control and sync locking."""
