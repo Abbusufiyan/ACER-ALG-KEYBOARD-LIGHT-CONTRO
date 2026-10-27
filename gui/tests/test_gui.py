@@ -164,50 +164,150 @@ class TestFanDashboard(unittest.TestCase):
         self.assertIn("Embedded Controller", report)
         self.assertIn("hwmon", report)
 
+    def test_thermals_and_fan_widget_ui(self):
+        """Verify ThermalsAndFanWidget initialization and mode selection."""
+        from PyQt6.QtWidgets import QApplication
+        from alg_rgb_gui.fan_dashboard import ThermalsAndFanWidget
+        from alg_rgb_gui.fan_controller import FanMode
+        from alg_rgb_gui.config import ConfigManager
+
+        app = QApplication.instance() or QApplication([])
+        cfg = ConfigManager()
+        cfg.config = {
+            "fan_mode": "auto",
+            "custom_cpu_duty": 50,
+            "custom_gpu_duty": 50,
+            "sync_fans": True,
+        }
+        widget = ThermalsAndFanWidget(config=cfg)
+        widget.stop_monitoring()  # Stop polling timer for test
+
+        # Check default state
+        self.assertEqual(widget.fan_controller.current_mode, FanMode.AUTO)
+        self.assertFalse(widget.slider_cpu_fan.isEnabled())
+        self.assertFalse(widget.slider_gpu_fan.isEnabled())
+
+        # Switch to Custom mode
+        widget.on_mode_selected(FanMode.CUSTOM)
+        self.assertEqual(widget.fan_controller.current_mode, FanMode.CUSTOM)
+        self.assertTrue(widget.slider_cpu_fan.isEnabled())
+        self.assertTrue(widget.slider_gpu_fan.isEnabled())
+
+        # Test Quick preset
+        widget.apply_quick_preset(75)
+        self.assertEqual(widget.slider_cpu_fan.value(), 75)
+        self.assertEqual(widget.slider_gpu_fan.value(), 75)
+        self.assertEqual(widget.fan_controller.custom_cpu_duty, 75)
+
+        # Switch to Balanced mode
+        widget.on_mode_selected(FanMode.BALANCED)
+        self.assertEqual(widget.fan_controller.current_mode, FanMode.BALANCED)
+        self.assertFalse(widget.slider_cpu_fan.isEnabled())
+
+        # Switch back to Auto
+        widget.on_mode_selected(FanMode.AUTO)
+        self.assertEqual(widget.fan_controller.current_mode, FanMode.AUTO)
+
 
 class TestFanController(unittest.TestCase):
-    def test_duty_clamping_and_conversions(self):
-        """Test safe duty clamping to prevent fan stall."""
-        from alg_rgb_gui.fan_controller import clamp_duty, pct_to_raw, raw_to_pct
+    def test_clamp_duty(self):
+        """Test safety clamp bounds [25%, 100%]."""
+        from alg_rgb_gui.fan_controller import clamp_duty
+        self.assertEqual(clamp_duty(0), 25)
         self.assertEqual(clamp_duty(10), 25)
+        self.assertEqual(clamp_duty(24), 25)
+        self.assertEqual(clamp_duty(25), 25)
         self.assertEqual(clamp_duty(50), 50)
+        self.assertEqual(clamp_duty(100), 100)
         self.assertEqual(clamp_duty(120), 100)
+
+    def test_raw_conversions(self):
+        """Test duty percentage <-> raw 8-bit conversions."""
+        from alg_rgb_gui.fan_controller import pct_to_raw, raw_to_pct
         self.assertEqual(pct_to_raw(0), 0)
+        self.assertEqual(pct_to_raw(50), 128)
         self.assertEqual(pct_to_raw(100), 255)
+        self.assertEqual(raw_to_pct(0), 0)
+        self.assertEqual(raw_to_pct(128), 50)
         self.assertEqual(raw_to_pct(255), 100)
 
     def test_curve_interpolation(self):
-        """Verify dynamic thermal curve calculation."""
+        """Test linear curve interpolation."""
         from alg_rgb_gui.fan_controller import interpolate_curve, BALANCED_CURVE
+        # Below min threshold
         self.assertEqual(interpolate_curve(BALANCED_CURVE, 30.0), 30)
+        # Exactly at first point (40C -> 30%)
+        self.assertEqual(interpolate_curve(BALANCED_CURVE, 40.0), 30)
+        # Midpoint between 40C (30%) and 50C (42%) -> ~36%
+        self.assertEqual(interpolate_curve(BALANCED_CURVE, 45.0), 36)
+        # Above max threshold (88C -> 100%)
         self.assertEqual(interpolate_curve(BALANCED_CURVE, 95.0), 100)
-        duty = interpolate_curve(BALANCED_CURVE, 55.0)
-        self.assertGreaterEqual(duty, 42)
-        self.assertLessEqual(duty, 58)
 
-    def test_engine_mode_transitions(self):
-        """Test fan controller engine mode switching and safety gate."""
+    def test_hardware_backend_safety_gate(self):
+        """Verify hardware writes remain gated and log calls in Phase 2."""
+        from alg_rgb_gui.fan_controller import FanHardwareBackend
+        backend = FanHardwareBackend(hardware_writes_enabled=False)
+        self.assertFalse(backend.hardware_writes_enabled)
+
+        ok, msg = backend.apply_manual_duty(60, 70)
+        self.assertTrue(ok)
+        self.assertIn("Safety-Gated", msg)
+        self.assertIn("SCMD 0x68", msg)
+        self.assertEqual(backend.last_commanded_cpu_raw, 153)
+        self.assertEqual(backend.last_commanded_gpu_raw, 178)
+        self.assertEqual(len(backend.call_history), 1)
+
+        ok, msg = backend.apply_auto_mode()
+        self.assertTrue(ok)
+        self.assertIn("Safety-Gated", msg)
+        self.assertIn("SCMD 0x69", msg)
+        self.assertEqual(len(backend.call_history), 2)
+
+    def test_engine_independent_and_synced_duty(self):
+        """Test engine independent CPU/GPU control and sync locking."""
         from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
         engine = FanControllerEngine()
-        self.assertFalse(engine.backend.hardware_writes_enabled)
-        self.assertEqual(engine.current_mode, FanMode.AUTO)
+        engine.set_mode(FanMode.CUSTOM)
 
-        ok, msg = engine.set_mode(FanMode.CUSTOM)
-        self.assertTrue(ok)
-        self.assertEqual(engine.current_mode, FanMode.CUSTOM)
+        # Unsync fans
+        engine.set_sync_fans(False)
+        self.assertFalse(engine.sync_fans)
 
-        engine.set_custom_duty(1, 65)
-        self.assertEqual(engine.custom_cpu_duty, 65)
-        self.assertEqual(engine.custom_gpu_duty, 65)
+        # Set independent duties
+        engine.set_custom_duty(1, 40)
+        engine.set_custom_duty(2, 70)
+        self.assertEqual(engine.custom_cpu_duty, 40)
+        self.assertEqual(engine.custom_gpu_duty, 70)
+        self.assertEqual(engine.active_cpu_target_pct, 40)
+        self.assertEqual(engine.active_gpu_target_pct, 70)
 
-        engine.sync_fans = False
-        engine.set_custom_duty(2, 80)
-        self.assertEqual(engine.custom_cpu_duty, 65)
+        # Re-enable sync -> GPU duty snaps to CPU duty
+        engine.set_sync_fans(True)
+        self.assertEqual(engine.custom_gpu_duty, 40)
+        self.assertEqual(engine.active_gpu_target_pct, 40)
+
+        # In sync mode, changing Fan 1 updates Fan 2
+        engine.set_custom_duty(1, 80)
+        self.assertEqual(engine.custom_cpu_duty, 80)
         self.assertEqual(engine.custom_gpu_duty, 80)
 
-        snap = engine.tick_thermal_update(92.0, 60.0)
-        self.assertTrue(snap["emergency_override"])
-        self.assertEqual(snap["active_cpu_pct"], 100)
+    def test_emergency_thermal_override(self):
+        """Test emergency 100% cooling trigger when temp >= 90C CPU or >= 85C GPU."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
+        engine = FanControllerEngine()
+        engine.set_mode(FanMode.SILENT)
+
+        # Normal operation: 50C
+        snapshot = engine.tick_thermal_update(50.0, 48.0)
+        self.assertFalse(snapshot["emergency_override"])
+        self.assertLess(snapshot["active_cpu_pct"], 100)
+
+        # Critical CPU temp: 92C
+        snapshot = engine.tick_thermal_update(92.0, 50.0)
+        self.assertTrue(snapshot["emergency_override"])
+        self.assertEqual(snapshot["active_cpu_pct"], 100)
+        self.assertEqual(snapshot["active_gpu_pct"], 100)
+        self.assertIn("EMERGENCY THERMAL SAFETY", snapshot["status_message"])
 
     def test_widget_instantiation(self):
         """Test ThermalsAndFanWidget GUI instantiation with all cards."""

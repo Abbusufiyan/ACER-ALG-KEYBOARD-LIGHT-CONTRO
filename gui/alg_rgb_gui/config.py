@@ -25,7 +25,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "custom_favorites": [
         "#FF0000", "#FF7F00", "#FFFF00", "#00FF00",
         "#00FFC8", "#0000C8", "#7F00C8", "#FF00C8"
-    ]
+    ],
+    "fan_mode": "auto",
+    "custom_cpu_duty": 50,
+    "custom_gpu_duty": 50,
+    "sync_fans": True,
 }
 
 

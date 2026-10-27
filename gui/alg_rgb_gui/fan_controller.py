@@ -142,18 +142,14 @@ class FanHardwareBackend:
             return (
                 True,
                 f"Safety-Gated: Target validated (CPU: {cpu_clamped}%, GPU: {gpu_clamped}%). "
-                f"Raw payload [{cpu_raw}, {gpu_raw}, 0, 0] ready."
+                f"Raw payload [{cpu_raw}, {gpu_raw}, 0, 0] ready for SCMD 0x68."
             )
 
-        # Hardware execution path (Active when approved)
-        try:
-            # When approved, writes formatted fan command to the ACPI driver device node
-            # The kernel driver handles Function 0x68 with payload [cpu_raw, gpu_raw, 0, 0]
-            with open(self.device_path, "w", encoding="utf-8") as f:
-                f.write(f"fan:{cpu_raw}:{gpu_raw}\n")
-            return True, f"Applied duty: CPU {cpu_clamped}% (raw {cpu_raw}), GPU {gpu_clamped}% (raw {gpu_raw})"
-        except Exception as e:
-            return False, f"Driver write error: {e}"
+        # Hardware execution path: blocked in Phase 2 until user approves Phase 3
+        return (
+            False,
+            "Hardware writes disabled: Phase 3 kernel driver fan interface (SCMD 0x68/0x69) awaiting approval."
+        )
 
     def apply_auto_mode(self) -> Tuple[bool, str]:
         """Restore autonomous firmware closed-loop control on both fans."""
@@ -165,14 +161,12 @@ class FanHardwareBackend:
         self.call_history.append(event)
 
         if not self.hardware_writes_enabled:
-            return True, "Safety-Gated: Firmware Automatic mode active."
+            return True, "Safety-Gated: Firmware Automatic mode active (EC closed loop). Payload [0x03, 0, 0, 0] ready for SCMD 0x69."
 
-        try:
-            with open(self.device_path, "w", encoding="utf-8") as f:
-                f.write("fan:auto\n")
-            return True, "Restored firmware automatic fan control (SCMD 0x69)."
-        except Exception as e:
-            return False, f"Driver restore error: {e}"
+        return (
+            False,
+            "Hardware writes disabled: Phase 3 kernel driver fan interface (SCMD 0x68/0x69) awaiting approval."
+        )
 
     def get_status(self) -> Dict[str, Any]:
         return {
@@ -200,6 +194,14 @@ class FanControllerEngine:
         self.active_gpu_target_pct = 50
         self.emergency_override = False
         self.last_status_message = "Firmware Automatic (EC Closed-Loop Active)"
+
+    def set_sync_fans(self, sync: bool):
+        """Enable or disable synchronizing CPU and GPU fan speeds."""
+        self.sync_fans = sync
+        if self.sync_fans:
+            self.custom_gpu_duty = self.custom_cpu_duty
+            if self.current_mode == FanMode.CUSTOM:
+                self.apply_custom_duty()
 
     def set_mode(self, mode: FanMode) -> Tuple[bool, str]:
         """Switch operational fan mode."""
