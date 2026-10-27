@@ -165,5 +165,62 @@ class TestFanDashboard(unittest.TestCase):
         self.assertIn("hwmon", report)
 
 
+class TestFanController(unittest.TestCase):
+    def test_duty_clamping_and_conversions(self):
+        """Test safe duty clamping to prevent fan stall."""
+        from alg_rgb_gui.fan_controller import clamp_duty, pct_to_raw, raw_to_pct
+        self.assertEqual(clamp_duty(10), 25)
+        self.assertEqual(clamp_duty(50), 50)
+        self.assertEqual(clamp_duty(120), 100)
+        self.assertEqual(pct_to_raw(0), 0)
+        self.assertEqual(pct_to_raw(100), 255)
+        self.assertEqual(raw_to_pct(255), 100)
+
+    def test_curve_interpolation(self):
+        """Verify dynamic thermal curve calculation."""
+        from alg_rgb_gui.fan_controller import interpolate_curve, BALANCED_CURVE
+        self.assertEqual(interpolate_curve(BALANCED_CURVE, 30.0), 30)
+        self.assertEqual(interpolate_curve(BALANCED_CURVE, 95.0), 100)
+        duty = interpolate_curve(BALANCED_CURVE, 55.0)
+        self.assertGreaterEqual(duty, 42)
+        self.assertLessEqual(duty, 58)
+
+    def test_engine_mode_transitions(self):
+        """Test fan controller engine mode switching and safety gate."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
+        engine = FanControllerEngine()
+        self.assertFalse(engine.backend.hardware_writes_enabled)
+        self.assertEqual(engine.current_mode, FanMode.AUTO)
+
+        ok, msg = engine.set_mode(FanMode.CUSTOM)
+        self.assertTrue(ok)
+        self.assertEqual(engine.current_mode, FanMode.CUSTOM)
+
+        engine.set_custom_duty(1, 65)
+        self.assertEqual(engine.custom_cpu_duty, 65)
+        self.assertEqual(engine.custom_gpu_duty, 65)
+
+        engine.sync_fans = False
+        engine.set_custom_duty(2, 80)
+        self.assertEqual(engine.custom_cpu_duty, 65)
+        self.assertEqual(engine.custom_gpu_duty, 80)
+
+        snap = engine.tick_thermal_update(92.0, 60.0)
+        self.assertTrue(snap["emergency_override"])
+        self.assertEqual(snap["active_cpu_pct"], 100)
+
+    def test_widget_instantiation(self):
+        """Test ThermalsAndFanWidget GUI instantiation with all cards."""
+        from PyQt6.QtWidgets import QApplication
+        from alg_rgb_gui.fan_dashboard import ThermalsAndFanWidget
+        app = QApplication.instance() or QApplication([])
+        widget = ThermalsAndFanWidget()
+        self.assertIsNotNone(widget.slider_cpu)
+        self.assertIsNotNone(widget.slider_gpu)
+        self.assertIsNotNone(widget.btn_auto)
+        widget.update_telemetry()
+        widget.stop_monitoring()
+
+
 if __name__ == "__main__":
     unittest.main()

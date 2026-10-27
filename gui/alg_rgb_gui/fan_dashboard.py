@@ -1,21 +1,27 @@
 """
 Thermal and Fan Control Dashboard for Acer ALG AL15G-52.
 Displays real-time CPU core thermals, NVIDIA RTX 2050 telemetry,
-storage temps, live 60-second rolling graph, and firmware cooling status.
+storage temps, live 60-second rolling graph, and full Windows Control Center-style
+fan controls (Auto, Silent, Balanced, Performance, Custom manual sliders).
 """
 
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QProgressBar, QFrame, QPushButton, QScrollArea, QToolTip,
-    QDialog, QTextBrowser, QDialogButtonBox
+    QDialog, QTextBrowser, QDialogButtonBox, QSlider, QCheckBox
 )
 from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 
 from .sensors import SensorEngine, CpuTelemetry, GpuTelemetry, FanHardwareStatus
 from .thermal_graph import TemperatureHistoryGraph
+from .fan_controller import (
+    FanMode, FanControllerEngine, FanHardwareBackend,
+    clamp_duty, pct_to_raw, raw_to_pct
+)
+from .config import ConfigManager
 
 
 class HardwareReportDialog(QDialog):
@@ -98,15 +104,15 @@ class HardwareReportDialog(QDialog):
             "- **Target Device:** `\\_SB.DCHU` (`CLV0001:00`)\n"
             "- **UUID:** `93f224e4-fbdc-4bbf-add6-db71bdc0afad`\n"
             "- **Function `0x67`:** Keyboard RGB Lighting (the only known, reverse-engineered, safe function implemented by `alg_rgb.ko`).\n"
-            "- **Function `0x0C` (`PK0C`):** Reads fan tachometer period registers (`RPM1`, `RPM2`) but executes 8 raw `ECMD` bus commands "
-            "querying battery/charger registers, risking bus saturation if polled repeatedly.\n"
-            "- **Function `0x0D` / `0x0E` (`PK0D` / `PK0E`):** Reads/writes BIOS fan trip points (`F1T1..F1T4`, `F1D1..F1D4`).\n"
-            "- **Function `0x79` (in `SCMD`):** Issues raw `ECMD` commands (`0xD7`) to toggle internal EC modes.\n\n"
+            "- **Function `0x68` (`SCMD 0x68`):** Manual Fan Duty dispatch (`0xC1, fan_id, duty`).\n"
+            "- **Function `0x69` (`SCMD 0x69`):** Auto Fan Restore dispatch (`0xC1, 0xFF, fan_id`).\n"
+            "- **Function `0x0C` (`PK0C`):** Reads fan tachometer period registers (`RPM1`, `RPM2`) alongside battery registers.\n"
+            "- **Function `0x0D` / `0x0E` (`PK0D` / `PK0E`):** Reads/writes BIOS fan trip points (`F1T1..F1T4`, `F1D1..F1D4`).\n\n"
             "## 5. Why Direct EC Writing is Strictly Prevented\n"
             "- Community workarounds (e.g. `ec_sys write_support=1`) attempt to force manual PWM by writing directly to EC registers.\n"
             "- Linux kernel maintainers explicitly document `ec_sys write_support` as: "
             "`\"Dangerous, reboot and removal of battery may be needed.\"*`\n"
-            "- On Clevo ECs, blind register writes cause bus collisions, battery desync, system hard-lockups (as directly noted during driver reverse-engineering), "
+            "- On Clevo ECs, blind register writes cause bus collisions, battery desync, system hard-lockups, "
             "or dangerous thermal runaway if userspace freezes while fans are manually throttled.\n"
             "- **Safety Guarantee:** Preserving the firmware's closed-loop automatic management ensures the laptop will never overheat, "
             "protecting the hardware from thermal damage."
@@ -117,8 +123,22 @@ class ThermalsAndFanWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.sensor_engine = SensorEngine()
+        self.config_mgr = ConfigManager()
+        self.fan_engine = FanControllerEngine()
+
+        # Load persisted fan settings
+        saved_mode_str = self.config_mgr.get("fan_mode", "auto")
+        try:
+            self.fan_engine.set_mode(FanMode(saved_mode_str))
+        except Exception:
+            self.fan_engine.set_mode(FanMode.AUTO)
+
+        self.fan_engine.custom_cpu_duty = int(self.config_mgr.get("custom_cpu_duty", 50))
+        self.fan_engine.custom_gpu_duty = int(self.config_mgr.get("custom_gpu_duty", 50))
+        self.fan_engine.sync_fans = bool(self.config_mgr.get("sync_fans", True))
 
         self.init_ui()
+        self.update_mode_ui_state()
 
         # Live telemetry polling timer (1 second interval)
         self.poll_timer = QTimer(self)
@@ -134,15 +154,17 @@ class ThermalsAndFanWidget(QWidget):
         main_layout.setContentsMargins(14, 14, 14, 14)
         main_layout.setSpacing(14)
 
-        # --- 1. FAN MODE & HARDWARE STATUS CARD ---
+        # =====================================================================
+        # 1. FAN MODE SELECTION CARD (Windows-Style Profile Selector)
+        # =====================================================================
         mode_card = QFrame()
         mode_card.setProperty("class", "cardFrame")
         mode_layout = QVBoxLayout(mode_card)
-        mode_layout.setContentsMargins(12, 12, 12, 12)
+        mode_layout.setContentsMargins(14, 14, 14, 14)
         mode_layout.setSpacing(10)
 
         mode_header = QHBoxLayout()
-        m_title = QLabel("Fan & Thermal Control Mode")
+        m_title = QLabel("Fan & Cooling Mode")
         m_title.setProperty("class", "sectionTitle")
         mode_header.addWidget(m_title)
         mode_header.addStretch()
@@ -156,56 +178,156 @@ class ThermalsAndFanWidget(QWidget):
         mode_header.addWidget(self.lbl_mode_badge)
         mode_layout.addLayout(mode_header)
 
-        # Info & Hardware Explanation Strip
-        exp_box = QFrame()
-        exp_box.setStyleSheet(
+        # Mode Buttons Row
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self.btn_auto = QPushButton("🛡️ Auto (Firmware)")
+        self.btn_silent = QPushButton("🌙 Silent")
+        self.btn_balanced = QPushButton("⚖️ Balanced")
+        self.btn_perf = QPushButton("⚡ Performance")
+        self.btn_custom = QPushButton("🎛️ Custom (Sliders)")
+
+        self.mode_buttons = {
+            FanMode.AUTO: self.btn_auto,
+            FanMode.SILENT: self.btn_silent,
+            FanMode.BALANCED: self.btn_balanced,
+            FanMode.PERFORMANCE: self.btn_perf,
+            FanMode.CUSTOM: self.btn_custom,
+        }
+
+        for mode, btn in self.mode_buttons.items():
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(34)
+            btn.clicked.connect(lambda _, m=mode: self.on_mode_button_clicked(m))
+            btn_row.addWidget(btn)
+
+        mode_layout.addLayout(btn_row)
+        main_layout.addWidget(mode_card)
+
+        # =====================================================================
+        # 2. ACTUATION & CUSTOM CONTROLS CARD
+        # =====================================================================
+        act_card = QFrame()
+        act_card.setProperty("class", "cardFrame")
+        act_layout = QVBoxLayout(act_card)
+        act_layout.setContentsMargins(14, 14, 14, 14)
+        act_layout.setSpacing(12)
+
+        act_header = QHBoxLayout()
+        act_title = QLabel("Fan Speed Actuation & Custom Targets")
+        act_title.setProperty("class", "sectionTitle")
+        act_header.addWidget(act_title)
+        act_header.addStretch()
+
+        self.lbl_safety_gate = QLabel("🔒 Phase 2 Safety Gate: Hardware Writes Gated")
+        self.lbl_safety_gate.setStyleSheet(
+            "background-color: #2e261e; color: #fab387; "
+            "border: 1px solid #f59e0b; border-radius: 6px; "
+            "padding: 3px 10px; font-size: 10px; font-weight: bold;"
+        )
+        act_header.addWidget(self.lbl_safety_gate)
+        act_layout.addLayout(act_header)
+
+        # CPU Fan Slider Row
+        cpu_slider_row = QHBoxLayout()
+        lbl_cpu_fan = QLabel("CPU Fan 1 Target:")
+        lbl_cpu_fan.setStyleSheet("font-weight: 600; color: #38bdf8; font-size: 12px; min-width: 130px;")
+        cpu_slider_row.addWidget(lbl_cpu_fan)
+
+        self.slider_cpu = QSlider(Qt.Orientation.Horizontal)
+        self.slider_cpu.setRange(25, 100)
+        self.slider_cpu.setValue(self.fan_engine.custom_cpu_duty)
+        self.slider_cpu.valueChanged.connect(self.on_cpu_slider_changed)
+        cpu_slider_row.addWidget(self.slider_cpu)
+
+        self.lbl_cpu_val = QLabel(f"{self.fan_engine.custom_cpu_duty}% (Raw: {pct_to_raw(self.fan_engine.custom_cpu_duty)}/255)")
+        self.lbl_cpu_val.setStyleSheet("font-size: 11px; font-weight: bold; color: #cdd6f4; min-width: 140px;")
+        cpu_slider_row.addWidget(self.lbl_cpu_val)
+        act_layout.addLayout(cpu_slider_row)
+
+        # GPU Fan Slider Row
+        gpu_slider_row = QHBoxLayout()
+        lbl_gpu_fan = QLabel("GPU Fan 2 Target:")
+        lbl_gpu_fan.setStyleSheet("font-weight: 600; color: #a6e3a1; font-size: 12px; min-width: 130px;")
+        gpu_slider_row.addWidget(lbl_gpu_fan)
+
+        self.slider_gpu = QSlider(Qt.Orientation.Horizontal)
+        self.slider_gpu.setRange(25, 100)
+        self.slider_gpu.setValue(self.fan_engine.custom_gpu_duty)
+        self.slider_gpu.valueChanged.connect(self.on_gpu_slider_changed)
+        gpu_slider_row.addWidget(self.slider_gpu)
+
+        self.lbl_gpu_val = QLabel(f"{self.fan_engine.custom_gpu_duty}% (Raw: {pct_to_raw(self.fan_engine.custom_gpu_duty)}/255)")
+        self.lbl_gpu_val.setStyleSheet("font-size: 11px; font-weight: bold; color: #cdd6f4; min-width: 140px;")
+        gpu_slider_row.addWidget(self.lbl_gpu_val)
+        act_layout.addLayout(gpu_slider_row)
+
+        # Bottom Controls: Link Fans & Quick Presets
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(10)
+
+        self.chk_sync = QCheckBox("🔗 Link CPU & GPU Fan Speeds")
+        self.chk_sync.setChecked(self.fan_engine.sync_fans)
+        self.chk_sync.toggled.connect(self.on_sync_toggled)
+        self.chk_sync.setStyleSheet("color: #cdd6f4; font-size: 11px; font-weight: 500;")
+        controls_row.addWidget(self.chk_sync)
+
+        controls_row.addStretch()
+
+        preset_lbl = QLabel("Quick Presets:")
+        preset_lbl.setStyleSheet("color: #6c7086; font-size: 10px;")
+        controls_row.addWidget(preset_lbl)
+
+        for p_val in (25, 50, 75, 100):
+            p_btn = QPushButton(f"{p_val}%" if p_val not in (25, 100) else (f"Min ({p_val}%)" if p_val == 25 else f"Max ({p_val}%)"))
+            p_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            p_btn.setStyleSheet(
+                "QPushButton { background: #181825; border: 1px solid #313244; "
+                "border-radius: 4px; padding: 3px 8px; font-size: 10px; color: #a6adc8; }"
+                "QPushButton:hover { background: #26273a; border-color: #89b4fa; color: #cdd6f4; }"
+            )
+            p_btn.clicked.connect(lambda _, v=p_val: self.on_quick_preset_clicked(v))
+            controls_row.addWidget(p_btn)
+
+        act_layout.addLayout(controls_row)
+
+        # Status text strip
+        status_box = QFrame()
+        status_box.setStyleSheet(
             "background-color: #181825; border: 1px solid #313244; "
-            "border-radius: 8px; padding: 10px;"
+            "border-radius: 6px; padding: 8px 12px;"
         )
-        exp_layout = QHBoxLayout(exp_box)
-        exp_layout.setContentsMargins(8, 8, 8, 8)
-        exp_layout.setSpacing(12)
+        sb_layout = QHBoxLayout(status_box)
+        sb_layout.setContentsMargins(4, 4, 4, 4)
+        sb_layout.setSpacing(10)
 
-        shield_lbl = QLabel("🛡️")
-        shield_lbl.setStyleSheet("font-size: 22px;")
-        exp_layout.addWidget(shield_lbl)
+        self.lbl_fan_status_detail = QLabel("Status: Firmware Automatic (EC Closed-Loop Active)")
+        self.lbl_fan_status_detail.setStyleSheet("font-size: 11px; color: #cdd6f4; font-weight: 500;")
+        sb_layout.addWidget(self.lbl_fan_status_detail)
+        sb_layout.addStretch()
 
-        exp_vbox = QVBoxLayout()
-        exp_vbox.setSpacing(2)
-        exp_title = QLabel("Embedded Controller Protection Active")
-        exp_title.setStyleSheet("font-weight: bold; color: #cdd6f4; font-size: 12px;")
-        exp_desc = QLabel(
-            "The Acer ALG AL15G-52 hardware controller autonomously regulates fan speeds "
-            "using BIOS thermal tables. Standard Linux drivers do not expose a PWM override knob; "
-            "firmware protection prevents thermal runaway or accidental fan stoppage."
-        )
-        exp_desc.setWordWrap(True)
-        exp_desc.setStyleSheet("font-size: 11px; color: #a6adc8;")
-        exp_vbox.addWidget(exp_title)
-        exp_vbox.addWidget(exp_desc)
-        exp_layout.addLayout(exp_vbox)
-
-        mode_layout.addWidget(exp_box)
-
-        # Action button to view detailed ACPI & EC report
-        btn_report = QPushButton("Detailed Hardware Architecture & Safety Report")
+        btn_report = QPushButton("Hardware Architecture & Safety Report")
         btn_report.setIcon(QIcon.fromTheme("help-about"))
         btn_report.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_report.setStyleSheet(
             "QPushButton {"
             "    background-color: #1e1e2e; color: #89b4fa; border: 1px solid #313244;"
-            "    border-radius: 6px; padding: 7px 14px; font-size: 11px; font-weight: bold;"
+            "    border-radius: 4px; padding: 4px 10px; font-size: 10px; font-weight: bold;"
             "}"
             "QPushButton:hover {"
             "    background-color: #26273a; border-color: #89b4fa;"
             "}"
         )
         btn_report.clicked.connect(self.show_hardware_report)
-        mode_layout.addWidget(btn_report)
+        sb_layout.addWidget(btn_report)
 
-        main_layout.addWidget(mode_card)
+        act_layout.addWidget(status_box)
+        main_layout.addWidget(act_card)
 
-        # --- 2. LIVE TEMPERATURE HISTORY GRAPH CARD ---
+        # =====================================================================
+        # 3. LIVE TEMPERATURE HISTORY GRAPH CARD
+        # =====================================================================
         graph_card = QFrame()
         graph_card.setProperty("class", "cardFrame")
         graph_layout = QVBoxLayout(graph_card)
@@ -227,7 +349,9 @@ class ThermalsAndFanWidget(QWidget):
         graph_layout.addWidget(self.graph_widget)
         main_layout.addWidget(graph_card)
 
-        # --- 3. DUAL PROCESSOR TELEMETRY: CPU & GPU ---
+        # =====================================================================
+        # 4. DUAL PROCESSOR TELEMETRY: CPU & GPU
+        # =====================================================================
         proc_row = QHBoxLayout()
         proc_row.setSpacing(14)
 
@@ -327,7 +451,9 @@ class ThermalsAndFanWidget(QWidget):
         proc_row.addWidget(self.gpu_card)
         main_layout.addLayout(proc_row)
 
-        # --- 4. AUXILIARY SYSTEM THERMALS CARD ---
+        # =====================================================================
+        # 5. AUXILIARY SYSTEM THERMALS CARD
+        # =====================================================================
         aux_card = QFrame()
         aux_card.setProperty("class", "cardFrame")
         aux_layout = QVBoxLayout(aux_card)
@@ -341,7 +467,6 @@ class ThermalsAndFanWidget(QWidget):
         self.aux_grid = QGridLayout()
         self.aux_grid.setSpacing(10)
 
-        # Placeholders for NVMe, ACPI, Wi-Fi
         self.aux_nvme_lbl = QLabel("NVMe SSD: --°C")
         self.aux_acpi_lbl = QLabel("ACPI Thermal Zone: --°C")
         self.aux_wifi_lbl = QLabel("Wi-Fi Adapter: --°C")
@@ -359,6 +484,134 @@ class ThermalsAndFanWidget(QWidget):
 
         main_layout.addWidget(aux_card)
 
+    def on_mode_button_clicked(self, mode: FanMode):
+        self.fan_engine.set_mode(mode)
+        self.config_mgr.set("fan_mode", mode.value)
+        self.update_mode_ui_state()
+        self.refresh_status_labels()
+
+    def update_mode_ui_state(self):
+        current = self.fan_engine.current_mode
+
+        # Define button themes
+        btn_styles = {
+            FanMode.AUTO: ("#1e3a2f", "#10b981", "#a6e3a1"),
+            FanMode.SILENT: ("#1e2a3a", "#38bdf8", "#7dd3fc"),
+            FanMode.BALANCED: ("#252538", "#89b4fa", "#cdd6f4"),
+            FanMode.PERFORMANCE: ("#3a2025", "#f38ba8", "#f5c2e7"),
+            FanMode.CUSTOM: ("#2e1e3a", "#cba6f7", "#f5c2e7"),
+        }
+
+        for mode, btn in self.mode_buttons.items():
+            if mode == current:
+                bg, border, col = btn_styles[mode]
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {bg}; border: 1px solid {border}; "
+                    f"border-radius: 6px; color: {col}; font-weight: bold; font-size: 11px; }}"
+                )
+            else:
+                btn.setStyleSheet(
+                    "QPushButton { background-color: #181825; border: 1px solid #313244; "
+                    "border-radius: 6px; color: #a6adc8; font-weight: 500; font-size: 11px; }"
+                    "QPushButton:hover { background-color: #26273a; border-color: #45475a; color: #cdd6f4; }"
+                )
+
+        badge_texts = {
+            FanMode.AUTO: ("FIRMWARE AUTOMATIC", "#1e3a2f", "#10b981", "#a6e3a1"),
+            FanMode.SILENT: ("SILENT PROFILE", "#1e2a3a", "#38bdf8", "#7dd3fc"),
+            FanMode.BALANCED: ("BALANCED PROFILE", "#252538", "#89b4fa", "#cdd6f4"),
+            FanMode.PERFORMANCE: ("PERFORMANCE PROFILE", "#3a2025", "#f38ba8", "#f5c2e7"),
+            FanMode.CUSTOM: ("CUSTOM MANUAL", "#2e1e3a", "#cba6f7", "#f5c2e7"),
+        }
+
+        b_text, b_bg, b_border, b_col = badge_texts[current]
+        self.lbl_mode_badge.setText(b_text)
+        self.lbl_mode_badge.setStyleSheet(
+            f"background-color: {b_bg}; color: {b_col}; "
+            f"border: 1px solid {b_border}; border-radius: 6px; "
+            f"padding: 3px 10px; font-size: 11px; font-weight: bold;"
+        )
+
+        is_custom = (current == FanMode.CUSTOM)
+        self.slider_cpu.setEnabled(is_custom)
+        self.slider_gpu.setEnabled(is_custom)
+        self.chk_sync.setEnabled(is_custom)
+
+        if is_custom:
+            self.slider_cpu.setValue(self.fan_engine.custom_cpu_duty)
+            self.slider_gpu.setValue(self.fan_engine.custom_gpu_duty)
+            self.lbl_cpu_val.setText(f"{self.fan_engine.custom_cpu_duty}% (Raw: {pct_to_raw(self.fan_engine.custom_cpu_duty)}/255)")
+            self.lbl_gpu_val.setText(f"{self.fan_engine.custom_gpu_duty}% (Raw: {pct_to_raw(self.fan_engine.custom_gpu_duty)}/255)")
+
+    def on_cpu_slider_changed(self, value: int):
+        self.lbl_cpu_val.setText(f"{value}% (Raw: {pct_to_raw(value)}/255)")
+        if self.fan_engine.sync_fans:
+            self.slider_gpu.blockSignals(True)
+            self.slider_gpu.setValue(value)
+            self.lbl_gpu_val.setText(f"{value}% (Raw: {pct_to_raw(value)}/255)")
+            self.slider_gpu.blockSignals(False)
+            self.fan_engine.set_custom_duty(2, value)
+
+        self.fan_engine.set_custom_duty(1, value)
+        self.config_mgr.set("custom_cpu_duty", value)
+        if self.fan_engine.sync_fans:
+            self.config_mgr.set("custom_gpu_duty", value)
+        self.refresh_status_labels()
+
+    def on_gpu_slider_changed(self, value: int):
+        self.lbl_gpu_val.setText(f"{value}% (Raw: {pct_to_raw(value)}/255)")
+        if self.fan_engine.sync_fans:
+            self.slider_cpu.blockSignals(True)
+            self.slider_cpu.setValue(value)
+            self.lbl_cpu_val.setText(f"{value}% (Raw: {pct_to_raw(value)}/255)")
+            self.slider_cpu.blockSignals(False)
+            self.fan_engine.set_custom_duty(1, value)
+
+        self.fan_engine.set_custom_duty(2, value)
+        self.config_mgr.set("custom_gpu_duty", value)
+        if self.fan_engine.sync_fans:
+            self.config_mgr.set("custom_cpu_duty", value)
+        self.refresh_status_labels()
+
+    def on_sync_toggled(self, checked: bool):
+        self.fan_engine.sync_fans = checked
+        self.config_mgr.set("sync_fans", checked)
+        if checked:
+            self.on_cpu_slider_changed(self.slider_cpu.value())
+
+    def on_quick_preset_clicked(self, val: int):
+        if self.fan_engine.current_mode != FanMode.CUSTOM:
+            self.on_mode_button_clicked(FanMode.CUSTOM)
+        self.slider_cpu.setValue(val)
+        if not self.fan_engine.sync_fans:
+            self.slider_gpu.setValue(val)
+
+    def refresh_status_labels(self):
+        state = self.fan_engine.get_state_snapshot()
+        mode_val = state["mode"].upper()
+
+        if state["mode"] == "auto":
+            self.lbl_fan_status_detail.setText("Status: Firmware Automatic (Autonomous Closed-Loop EC Table Active)")
+            self.lbl_cpu_fan_status.setText("Cooling: Fan 1 (EC Firmware Auto)")
+            self.lbl_gpu_fan_status.setText("Cooling: Fan 2 (EC Firmware Auto)")
+        elif state["mode"] == "custom":
+            self.lbl_fan_status_detail.setText(
+                f"Target: CPU Fan 1 = {state['custom_cpu_duty']}% ({pct_to_raw(state['custom_cpu_duty'])}/255) | "
+                f"GPU Fan 2 = {state['custom_gpu_duty']}% ({pct_to_raw(state['custom_gpu_duty'])}/255) [Manual Sliders]"
+            )
+            self.lbl_cpu_fan_status.setText(f"Cooling: Fan 1 Target = {state['custom_cpu_duty']}%")
+            self.lbl_gpu_fan_status.setText(f"Cooling: Fan 2 Target = {state['custom_gpu_duty']}%")
+        else:
+            self.lbl_fan_status_detail.setText(
+                f"Profile [{mode_val}]: Active Target = {state['active_cpu_pct']}% ({state['active_cpu_raw']}/255) "
+                f"[Dynamic Thermal Curve]"
+            )
+            self.lbl_cpu_fan_status.setText(f"Cooling: Fan 1 Target = {state['active_cpu_pct']}% (Curve)")
+            self.lbl_gpu_fan_status.setText(f"Cooling: Fan 2 Target = {state['active_gpu_pct']}% (Curve)")
+
+        if state["emergency_override"]:
+            self.lbl_fan_status_detail.setText(f"⚠️ {state['status_message']}")
+
     def update_telemetry(self):
         # 1. CPU Telemetry
         cpu = self.sensor_engine.read_cpu_telemetry()
@@ -366,13 +619,12 @@ class ThermalsAndFanWidget(QWidget):
             self.lbl_cpu_pkg.setText(f"{cpu.package_temp:.0f}°C")
             self.cpu_bar.setValue(int(cpu.package_temp))
 
-            # Dynamic bar color based on temp
             if cpu.package_temp >= 85:
-                bar_color = "#f38ba8"  # Hot Red
+                bar_color = "#f38ba8"
             elif cpu.package_temp >= 70:
-                bar_color = "#fab387"  # Warm Amber
+                bar_color = "#fab387"
             else:
-                bar_color = "#38bdf8"  # Normal Blue
+                bar_color = "#38bdf8"
 
             self.cpu_bar.setStyleSheet(
                 "QProgressBar { background: #181926; border-radius: 4px; }"
@@ -399,13 +651,32 @@ class ThermalsAndFanWidget(QWidget):
             self.gpu_bar.setValue(20)
             self.lbl_gpu_load.setText("NVIDIA GPU in low-power standby")
 
-        # 3. Add to live graph
+        # 3. Fan Controller Thermal Tick
+        cpu_temp = cpu.package_temp if cpu.sensor_found and cpu.package_temp > 0 else 45.0
+        gpu_temp = gpu.temp_c if gpu.available else 40.0
+        snapshot = self.fan_engine.tick_thermal_update(cpu_temp, gpu_temp)
+
+        # Reflect dynamic target on sliders when in curve mode
+        if self.fan_engine.current_mode in (FanMode.SILENT, FanMode.BALANCED, FanMode.PERFORMANCE):
+            target = snapshot["active_cpu_pct"]
+            self.slider_cpu.blockSignals(True)
+            self.slider_gpu.blockSignals(True)
+            self.slider_cpu.setValue(target)
+            self.slider_gpu.setValue(target)
+            self.lbl_cpu_val.setText(f"{target}% (Curve Target)")
+            self.lbl_gpu_val.setText(f"{target}% (Curve Target)")
+            self.slider_cpu.blockSignals(False)
+            self.slider_gpu.blockSignals(False)
+
+        self.refresh_status_labels()
+
+        # 4. Add to live graph
         self.graph_widget.add_sample(
             cpu.package_temp if cpu.package_temp > 0 else 45.0,
             gpu.temp_c if gpu.available else 0.0
         )
 
-        # 4. Auxiliary System Temps
+        # 5. Auxiliary System Temps
         aux = self.sensor_engine.read_auxiliary_temperatures()
         if "NVMe SSD" in aux:
             self.aux_nvme_lbl.setText(f"💾 NVMe SSD: {aux['NVMe SSD']:.1f}°C")
