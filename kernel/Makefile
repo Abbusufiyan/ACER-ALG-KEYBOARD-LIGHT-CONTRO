@@ -1,8 +1,8 @@
 obj-m += alg_rgb.o
 
-ccflags-y += -I$(shell pwd)/../include
+ccflags-y += -I$(src)/../include
 
-KDIR := /lib/modules/$(shell uname -r)/build
+KDIR ?= /lib/modules/$(if $(KERNELRELEASE),$(KERNELRELEASE),$(shell uname -r))/build
 PWD  := $(shell pwd)
 
 all:

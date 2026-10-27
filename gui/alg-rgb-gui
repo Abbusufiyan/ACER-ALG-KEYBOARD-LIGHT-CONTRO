@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0
+"""
+Acer ALG RGB GUI Launcher
+"""
+
+import sys
+import os
+
+# Check multiple possible locations for alg_rgb_gui package:
+possible_paths = [
+    os.path.dirname(os.path.realpath(__file__)),
+    "/usr/local/share/alg-rgb-gui",
+    os.path.expanduser("~/alg-cli/gui")
+]
+
+for p in possible_paths:
+    if os.path.isdir(os.path.join(p, "alg_rgb_gui")) and p not in sys.path:
+        sys.path.insert(0, p)
+        break
+
+from alg_rgb_gui.app import main
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Acer ALG RGB
+GenericName=RGB Keyboard Controller
+Comment=Control built-in RGB keyboard lighting on Acer ALG laptops
+Exec=alg-rgb-gui
+Icon=alg-rgb-gui
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;Qt;
+Keywords=rgb;keyboard;backlight;acer;alg;lighting;
+StartupWMClass=alg-rgb-gui
