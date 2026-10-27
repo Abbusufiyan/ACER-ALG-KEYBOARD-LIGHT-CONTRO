@@ -1,72 +1,83 @@
-# Acer ALG RGB Keyboard Controller & GUI
+# Acer ALG Control Center — RGB Keyboard & Thermal Monitor
 
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL%202.0-blue.svg)](LICENSE)
 [![Platform: Arch Linux](https://img.shields.io/badge/Platform-Arch%20Linux-1793d1.svg)](https://archlinux.org)
 [![Desktop: KDE Plasma 6](https://img.shields.io/badge/Desktop-KDE%20Plasma%206-1d99f3.svg)](https://kde.org/plasma-desktop/)
 [![Framework: PyQt6](https://img.shields.io/badge/GUI-PyQt6-41cd52.svg)](https://riverbankcomputing.com/software/pyqt/)
 
-A native Linux solution for controlling the built-in RGB keyboard backlight on **Acer ALG laptops** (such as the **Acer ALG AL15G-52** and **AL15G-53**).
+A native Linux hardware utility and graphical control center designed for **Acer ALG laptops** (such as the **Acer ALG AL15G-52** and **AL15G-53**).
 
-Includes an in-tree Linux kernel driver, DKMS integration, a lightweight command-line utility, and a modern dark-themed **desktop GUI application** designed for Wayland and KDE Plasma 6.
+Provides complete built-in RGB keyboard backlight control, real-time CPU & NVIDIA GPU thermal telemetry, rolling temperature history graphing, and firmware cooling status.
 
 ---
 
 ## Architecture Overview
 
-On Acer ALG series laptops, official keyboard RGB software is only distributed for Windows via an ACPI bridge (`AcpiBridge.sys`). On Linux, the keyboard backlight defaults to firmware static states without vendor support.
+On Acer ALG series laptops, hardware management is traditionally restricted to vendor Windows software communicating through proprietary ACPI bridges (`AcpiBridge.sys`).
 
-This project communicates directly with the firmware through the reverse-engineered **CLV0001 ACPI interface**:
+This project bridges hardware control under Linux using verified, reverse-engineered kernel interfaces and non-blocking telemetry:
 
 ```text
 ┌────────────────────────────────────────────────────────┐
-│               Acer ALG RGB GUI                         │
+│             Acer ALG Control Center                    │
 │        (PyQt6 / Wayland / KDE Plasma 6)                │
-└──────────────────────────┬─────────────────────────────┘
-                           │ executes CLI / reads sysfs
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│                  alg-rgb CLI                           │
-│        (Input validation, arg parsing, exit codes)     │
-└──────────────────────────┬─────────────────────────────┘
-                           │ writes validated payload
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│            Device Node: /dev/alg_rgb                   │
-│        (Mode 0660, Group: alg-rgb, No Root Needed)     │
-└──────────────────────────┬─────────────────────────────┘
-                           │ character device file_operations
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│            alg_rgb Linux Kernel Driver                 │
-│        (Evaluates _DSM UUID 93f224e4... Function 0x67) │
-└──────────────────────────┬─────────────────────────────┘
-                           │ ACPI evaluate DSM
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│            ACPI Device: \_SB.DCHU (CLV0001)            │
-│        (Dispatches SCMD bytecode to EC Mailbox)        │
-└──────────────────────────┬─────────────────────────────┘
-                           │ ECMD write
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│         Hardware Embedded Controller (EC)              │
-│  [C4 0D / C4 0E: Power] [C4 02: PWM] [CA 07/03: Color] │
-└────────────────────────────────────────────────────────┘
+└──────────────┬──────────────────────────┬──────────────┘
+               │                          │
+       [Keyboard RGB]               [Thermals & Fans]
+               │                          │
+               ▼                          ▼
+┌──────────────────────────┐  ┌──────────────────────────┐
+│       alg-rgb CLI        │  │   Sensor Telemetry Engine│
+│   (/usr/local/bin/alg-rgb)│  │ (coretemp, nvidia-smi,   │
+└──────────────┬───────────┘  │  nvme, acpitz)           │
+               │              └──────────────────────────┘
+               ▼
+┌──────────────────────────┐
+│   Device: /dev/alg_rgb   │
+│ (Mode 0660, alg-rgb grp) │
+└──────────────┬───────────┘
+               │
+               ▼
+┌──────────────────────────┐
+│    alg_rgb Kernel Driver │
+│ (Function 0x67 DSM call) │
+└──────────────┬───────────┘
+               │
+               ▼
+┌──────────────────────────┐
+│ ACPI: \_SB.DCHU (CLV0001)│
+└──────────────┬───────────┘
+               │
+               ▼
+┌──────────────────────────┐
+│  Embedded Controller (EC)│
+│ [C4 0D/0E/02, CA 07/03]  │
+└──────────────────────────┘
 ```
 
 ---
 
 ## Features
 
-### Desktop GUI (`alg-rgb-gui`)
+### ⌨️ Keyboard RGB Control
 - **Interactive Keyboard Glow Preview**: Stylized laptop keyboard rendering dynamic ambient light and keycap underglow matching the active RGB color and brightness.
 - **16 Calibrated Color Presets**: One-click selection of all firmware-supported colors with hex codes.
 - **Visual Color Picker & Hex Input**: Select arbitrary colors via visual dialog or hex (`#RRGGBB`). An integrated perceptual color-distance algorithm automatically selects the closest calibrated firmware preset.
 - **Debounced Brightness Slider**: 5 discrete levels (`Off`, `25%`, `50%`, `75%`, `100%`) debounced to protect the ACPI/EC mailbox from rapid input spam.
 - **Power Controls**: Single-click "Turn Off" button and "Turn On / Restore" functionality.
 - **KDE Plasma 6 System Tray**: Taskbar icon dynamically tinted with the active keyboard color, featuring quick presets, brightness levels, and power toggles.
-- **Live Diagnostics**: Non-intrusively monitors `/dev/alg_rgb` status, ACPI return status, and driver parameters without altering hardware state.
+
+### ❄️ Thermals & Fan Monitoring
+- **Real-Time CPU Package & Core Temperatures**: Individual tracking for Intel Alder Lake-P Package and all 8 performance/efficiency cores via kernel `coretemp`.
+- **NVIDIA GeForce RTX 2050 Telemetry**: Live GPU core temperature, GPU utilization %, power draw (Watts), and VRAM allocation via `nvidia-smi`.
+- **Storage & System Thermals**: Live monitoring of NVMe SSD temperature, ACPI motherboard thermal zone, and Wi-Fi module.
+- **Live 60-Second Rolling Temperature Graph**: Animated canvas plotting continuous temperature curves for both CPU and GPU against warning (85°C) and critical (100°C) thresholds.
+- **Firmware Cooling & Fan Protection Status**: Transparently reports the active Embedded Controller cooling policy and thermal protection state.
+
+### ⚙️ Diagnostics & Preferences
+- Non-intrusively monitors `/dev/alg_rgb` status, ACPI return status, and driver parameters without altering hardware state.
 - **Optional Login Restore**: Optional autostart preference (`~/.config/autostart/alg-rgb-restore.desktop`) to reapply your preferred color and brightness on desktop login.
+- **Minimize to Tray on Close**: Keeps the application accessible in the KDE Plasma taskbar.
 
 ### Command-Line Interface (`alg-rgb`)
 - Fast, dependency-free C binary for scripting and terminal usage.

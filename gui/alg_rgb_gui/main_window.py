@@ -1,7 +1,7 @@
 """
-Primary Main Window for Acer ALG RGB GUI.
-Combines keyboard preview, color palette, custom hex picker, brightness slider,
-system diagnostics, and autostart preferences.
+Primary Main Window for Acer ALG Control Center.
+Combines keyboard RGB lighting controls, real-time thermal telemetry,
+fan mode status, rolling temperature history graphs, and system diagnostics.
 """
 
 import os
@@ -10,20 +10,20 @@ from typing import Optional, List
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QTabWidget, QLineEdit, QCheckBox,
-    QColorDialog, QScrollArea, QFrame, QMessageBox, QButtonGroup,
-    QGraphicsDropShadowEffect, QApplication
+    QColorDialog, QScrollArea, QFrame, QMessageBox, QApplication
 )
-from PyQt6.QtGui import QIcon, QColor, QFont, QPixmap, QPainter
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QIcon, QColor, QFont
+from PyQt6.QtCore import Qt, QTimer
 
 from .colors import (
     AlgColor, SUPPORTED_COLORS, COLOR_OFF,
-    get_color, hex_to_rgb, rgb_to_hex, find_nearest_preset
+    get_color, hex_to_rgb, find_nearest_preset
 )
 from .backend import apply_color, turn_off, read_diagnostics, find_cli_path
 from .config import ConfigManager
 from .preview import KeyboardPreviewWidget
 from .tray import AlgTrayIcon
+from .fan_dashboard import ThermalsAndFanWidget
 
 
 class ColorSwatchButton(QPushButton):
@@ -120,25 +120,21 @@ class AcerAlgRgbWindow(QMainWindow):
         self.diag_timer.start()
 
     def init_ui(self):
-        self.setWindowTitle("Acer ALG RGB - Keyboard Lighting")
-        self.resize(640, 780)
-        self.setMinimumSize(560, 680)
+        self.setWindowTitle("Acer ALG Control Center")
+        self.resize(680, 840)
+        self.setMinimumSize(580, 700)
         if os.path.exists(self.icon_path):
             self.setWindowIcon(QIcon(self.icon_path))
 
-        # Main scrollable container
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.setCentralWidget(scroll)
+        # Main Central Container
+        central_container = QWidget()
+        self.setCentralWidget(central_container)
 
-        content = QWidget()
-        scroll.setWidget(content)
+        root_layout = QVBoxLayout(central_container)
+        root_layout.setContentsMargins(14, 14, 14, 14)
+        root_layout.setSpacing(10)
 
-        main_layout = QVBoxLayout(content)
-        main_layout.setContentsMargins(18, 18, 18, 18)
-        main_layout.setSpacing(14)
-
-        # --- 1. HEADER BAR ---
+        # --- TOP HEADER BAR ---
         header_layout = QHBoxLayout()
         header_layout.setSpacing(10)
 
@@ -148,7 +144,7 @@ class AcerAlgRgbWindow(QMainWindow):
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
 
-        title_lbl = QLabel("Acer ALG RGB")
+        title_lbl = QLabel("Acer ALG Control Center")
         title_lbl.setStyleSheet("font-size: 18px; font-weight: bold; color: #f5e0dc;")
         title_row.addWidget(title_lbl)
 
@@ -161,7 +157,7 @@ class AcerAlgRgbWindow(QMainWindow):
         title_row.addWidget(model_badge)
         title_row.addStretch()
 
-        sub_lbl = QLabel("Built-in Keyboard RGB Lighting Controller")
+        sub_lbl = QLabel("Built-in Keyboard RGB & Thermal Management")
         sub_lbl.setStyleSheet("font-size: 11px; color: #a6adc8;")
 
         title_vbox.addLayout(title_row)
@@ -169,16 +165,29 @@ class AcerAlgRgbWindow(QMainWindow):
         header_layout.addLayout(title_vbox)
         header_layout.addStretch()
 
-        # Quick Power Switch in header
-        self.btn_power_toggle = QPushButton("Turn Off")
+        # Quick Power Switch for Keyboard Lighting
+        self.btn_power_toggle = QPushButton("Lighting: Turn Off")
         self.btn_power_toggle.setProperty("class", "offButton")
         self.btn_power_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_power_toggle.clicked.connect(self.toggle_power)
         header_layout.addWidget(self.btn_power_toggle)
 
-        main_layout.addLayout(header_layout)
+        root_layout.addLayout(header_layout)
 
-        # --- 2. KEYBOARD PREVIEW CARD ---
+        # --- PRIMARY NAVIGATION TABS ---
+        self.main_nav_tabs = QTabWidget()
+
+        # TAB 1: KEYBOARD RGB CONTROLS
+        tab_rgb_scroll = QScrollArea()
+        tab_rgb_scroll.setWidgetResizable(True)
+        tab_rgb_content = QWidget()
+        tab_rgb_scroll.setWidget(tab_rgb_content)
+
+        rgb_layout = QVBoxLayout(tab_rgb_content)
+        rgb_layout.setContentsMargins(12, 12, 12, 12)
+        rgb_layout.setSpacing(14)
+
+        # Keyboard Preview Card
         preview_card = QFrame()
         preview_card.setProperty("class", "cardFrame")
         preview_layout = QVBoxLayout(preview_card)
@@ -199,33 +208,26 @@ class AcerAlgRgbWindow(QMainWindow):
         p_header.addWidget(self.lbl_status_pill)
         preview_layout.addLayout(p_header)
 
-        # Custom keyboard preview widget
         self.preview_widget = KeyboardPreviewWidget(self)
         preview_layout.addWidget(self.preview_widget)
 
-        # Current Settings Summary Strip
         strip_layout = QHBoxLayout()
         strip_layout.setSpacing(14)
-
         self.strip_color_dot = QLabel()
         self.strip_color_dot.setFixedSize(14, 14)
         self.strip_color_dot.setStyleSheet("background-color: #FF0000; border-radius: 7px;")
         strip_layout.addWidget(self.strip_color_dot)
-
         self.strip_color_label = QLabel("Color: Red (#FF0000)")
         self.strip_color_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #cdd6f4;")
         strip_layout.addWidget(self.strip_color_label)
-
         strip_layout.addStretch()
-
         self.strip_bright_label = QLabel("Brightness: Level 4 (100%)")
         self.strip_bright_label.setStyleSheet("font-size: 12px; color: #a6adc8;")
         strip_layout.addWidget(self.strip_bright_label)
-
         preview_layout.addLayout(strip_layout)
-        main_layout.addWidget(preview_card)
+        rgb_layout.addWidget(preview_card)
 
-        # --- 3. COLOR PALETTE CARD ---
+        # Color Palette Card
         color_card = QFrame()
         color_card.setProperty("class", "cardFrame")
         color_layout = QVBoxLayout(color_card)
@@ -238,7 +240,7 @@ class AcerAlgRgbWindow(QMainWindow):
 
         color_tabs = QTabWidget()
 
-        # Tab A: Preset Swatches Grid
+        # Presets Subtab
         tab_presets = QWidget()
         grid = QGridLayout(tab_presets)
         grid.setContentsMargins(8, 10, 8, 10)
@@ -254,7 +256,7 @@ class AcerAlgRgbWindow(QMainWindow):
 
         color_tabs.addTab(tab_presets, "Calibrated Presets (16)")
 
-        # Tab B: Custom Color Picker & Hex Input
+        # Custom Hex Subtab
         tab_custom = QWidget()
         custom_layout = QVBoxLayout(tab_custom)
         custom_layout.setContentsMargins(12, 12, 12, 12)
@@ -262,7 +264,6 @@ class AcerAlgRgbWindow(QMainWindow):
 
         picker_row = QHBoxLayout()
         picker_row.setSpacing(12)
-
         self.btn_open_picker = QPushButton("Open Visual Color Picker...")
         self.btn_open_picker.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_open_picker.clicked.connect(self.open_color_dialog)
@@ -278,10 +279,8 @@ class AcerAlgRgbWindow(QMainWindow):
         self.btn_apply_hex.clicked.connect(self._on_apply_hex_clicked)
         picker_row.addWidget(self.btn_apply_hex)
         picker_row.addStretch()
-
         custom_layout.addLayout(picker_row)
 
-        # Nearest firmware match info box
         self.match_box = QFrame()
         self.match_box.setStyleSheet(
             "background-color: #181825; border: 1px solid #313244; "
@@ -314,7 +313,6 @@ class AcerAlgRgbWindow(QMainWindow):
         match_text_vbox.addWidget(self.lbl_match_desc)
         match_layout.addLayout(match_text_vbox)
         match_layout.addStretch()
-
         custom_layout.addWidget(self.match_box)
 
         # Quick Favorites Row
@@ -340,9 +338,9 @@ class AcerAlgRgbWindow(QMainWindow):
 
         color_tabs.addTab(tab_custom, "Custom Color & Hex")
         color_layout.addWidget(color_tabs)
-        main_layout.addWidget(color_card)
+        rgb_layout.addWidget(color_card)
 
-        # --- 4. BRIGHTNESS & CONTROLS CARD ---
+        # Brightness & Controls Card
         control_card = QFrame()
         control_card.setProperty("class", "cardFrame")
         control_layout = QVBoxLayout(control_card)
@@ -360,7 +358,6 @@ class AcerAlgRgbWindow(QMainWindow):
         b_header.addWidget(self.lbl_bright_val)
         control_layout.addLayout(b_header)
 
-        # Slider (0..4)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 4)
         self.slider.setTickPosition(QSlider.TickPosition.TicksBelow)
@@ -370,7 +367,6 @@ class AcerAlgRgbWindow(QMainWindow):
         self.slider.valueChanged.connect(self._on_slider_value_changed)
         control_layout.addWidget(self.slider)
 
-        # Discrete tick labels
         tick_row = QHBoxLayout()
         tick_labels = ["Off (0)", "25% (1)", "50% (2)", "75% (3)", "100% (4)"]
         for idx, t in enumerate(tick_labels):
@@ -385,40 +381,69 @@ class AcerAlgRgbWindow(QMainWindow):
             tick_row.addWidget(lbl)
         control_layout.addLayout(tick_row)
 
-        # Action Buttons Row
         actions_row = QHBoxLayout()
         actions_row.setSpacing(10)
-
         self.chk_instant = QCheckBox("Instant Apply")
         self.chk_instant.setChecked(bool(self.config.get("instant_apply", True)))
         self.chk_instant.toggled.connect(self._on_instant_toggled)
         actions_row.addWidget(self.chk_instant)
-
         actions_row.addStretch()
-
         self.btn_apply = QPushButton("Apply Settings")
         self.btn_apply.setProperty("class", "primaryButton")
         self.btn_apply.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_apply.clicked.connect(self.apply_current_settings)
         actions_row.addWidget(self.btn_apply)
-
         control_layout.addLayout(actions_row)
-        main_layout.addWidget(control_card)
+        rgb_layout.addWidget(control_card)
 
-        # --- 5. SYSTEM DIAGNOSTICS & SETTINGS CARD ---
-        extra_card = QFrame()
-        extra_card.setProperty("class", "cardFrame")
-        extra_layout = QVBoxLayout(extra_card)
-        extra_layout.setContentsMargins(12, 12, 12, 12)
-        extra_layout.setSpacing(10)
+        self.main_nav_tabs.addTab(tab_rgb_scroll, "⌨️ Keyboard RGB")
 
-        extra_tabs = QTabWidget()
+        # TAB 2: THERMALS & FANS MONITORING
+        tab_fan_scroll = QScrollArea()
+        tab_fan_scroll.setWidgetResizable(True)
+        self.fan_widget = ThermalsAndFanWidget(self)
+        tab_fan_scroll.setWidget(self.fan_widget)
+        self.main_nav_tabs.addTab(tab_fan_scroll, "❄️ Thermals & Fans")
 
-        # Tab: Live Diagnostics
-        tab_diag = QWidget()
-        d_layout = QVBoxLayout(tab_diag)
-        d_layout.setContentsMargins(8, 8, 8, 8)
-        d_layout.setSpacing(6)
+        # TAB 3: SYSTEM DIAGNOSTICS & SETTINGS
+        tab_diag_scroll = QScrollArea()
+        tab_diag_scroll.setWidgetResizable(True)
+        diag_content = QWidget()
+        tab_diag_scroll.setWidget(diag_content)
+        diag_layout = QVBoxLayout(diag_content)
+        diag_layout.setContentsMargins(14, 14, 14, 14)
+        diag_layout.setSpacing(14)
+
+        # Hardware Info Card
+        hw_info_card = QFrame()
+        hw_info_card.setProperty("class", "cardFrame")
+        hw_layout = QVBoxLayout(hw_info_card)
+        hw_layout.setSpacing(6)
+        hw_title = QLabel("Hardware & Platform")
+        hw_title.setProperty("class", "sectionTitle")
+        hw_layout.addWidget(hw_title)
+
+        hw_details = [
+            "Laptop Model: Acer ALG AL15G-52",
+            "Motherboard: Aspire Lite AL15G-52",
+            "Processors: Intel Core (Alder Lake-P) + NVIDIA GeForce RTX 2050",
+            "ACPI Hardware Device: \\_SB.DCHU (CLV0001:00)",
+            "Cooling Subsystem: Dual Fan Assembly (Firmware / EC Managed)"
+        ]
+        for line in hw_details:
+            lbl = QLabel(f"• {line}")
+            lbl.setStyleSheet("font-size: 11px; color: #cdd6f4;")
+            hw_layout.addWidget(lbl)
+        diag_layout.addWidget(hw_info_card)
+
+        # Driver Diagnostics Card
+        drv_card = QFrame()
+        drv_card.setProperty("class", "cardFrame")
+        drv_layout = QVBoxLayout(drv_card)
+        drv_layout.setSpacing(6)
+        drv_title = QLabel("Kernel Driver & Device Node")
+        drv_title.setProperty("class", "sectionTitle")
+        drv_layout.addWidget(drv_title)
 
         self.lbl_diag_dev = QLabel("Device Node: checking...")
         self.lbl_diag_acpi = QLabel("ACPI Status: checking...")
@@ -428,22 +453,24 @@ class AcerAlgRgbWindow(QMainWindow):
 
         for lbl in (self.lbl_diag_dev, self.lbl_diag_acpi, self.lbl_diag_driver, self.lbl_diag_hw):
             lbl.setStyleSheet("font-size: 11px; color: #a6adc8;")
-            d_layout.addWidget(lbl)
+            drv_layout.addWidget(lbl)
 
         d_btn_row = QHBoxLayout()
         d_btn_row.addStretch()
         btn_refresh_diag = QPushButton("Refresh Status")
         btn_refresh_diag.clicked.connect(self.refresh_diagnostics)
         d_btn_row.addWidget(btn_refresh_diag)
-        d_layout.addLayout(d_btn_row)
+        drv_layout.addLayout(d_btn_row)
+        diag_layout.addWidget(drv_card)
 
-        extra_tabs.addTab(tab_diag, "Driver Status")
-
-        # Tab: Preferences & Autostart
-        tab_settings = QWidget()
-        s_layout = QVBoxLayout(tab_settings)
-        s_layout.setContentsMargins(8, 8, 8, 8)
+        # Settings Card
+        settings_card = QFrame()
+        settings_card.setProperty("class", "cardFrame")
+        s_layout = QVBoxLayout(settings_card)
         s_layout.setSpacing(8)
+        s_title = QLabel("Application Preferences")
+        s_title.setProperty("class", "sectionTitle")
+        s_layout.addWidget(s_title)
 
         self.chk_autostart = QCheckBox("Restore keyboard lighting automatically on desktop login")
         self.chk_autostart.setChecked(bool(self.config.get("restore_on_login", False)))
@@ -455,13 +482,14 @@ class AcerAlgRgbWindow(QMainWindow):
         self.chk_tray_close.toggled.connect(lambda v: self.config.set("minimize_to_tray", v))
         s_layout.addWidget(self.chk_tray_close)
 
-        desc_lbl = QLabel("Acer ALG AL15G-52 RGB Keyboard Driver v0.1.3")
+        desc_lbl = QLabel("Acer ALG RGB & Thermal Controller v0.1.3")
         desc_lbl.setStyleSheet("font-size: 10px; color: #6c7086;")
         s_layout.addWidget(desc_lbl)
+        diag_layout.addWidget(settings_card)
 
-        extra_tabs.addTab(tab_settings, "Preferences")
-        extra_layout.addWidget(extra_tabs)
-        main_layout.addWidget(extra_card)
+        self.main_nav_tabs.addTab(tab_diag_scroll, "⚙️ Diagnostics & Settings")
+
+        root_layout.addWidget(self.main_nav_tabs)
 
     def init_tray(self):
         self.tray = AlgTrayIcon(self.icon_path, self)
@@ -475,12 +503,10 @@ class AcerAlgRgbWindow(QMainWindow):
     def restore_initial_state(self):
         diag = read_diagnostics()
 
-        # Check if driver reported an active color & brightness
         active_color_name = diag.get("last_color", "none")
         active_bright = diag.get("last_brightness", -1)
 
         if active_color_name in ("none", "unknown", "") or active_color_name == "off":
-            # Fall back to saved config
             saved_color_name = self.config.get("last_color", "red")
             matched = get_color(saved_color_name) or SUPPORTED_COLORS[0]
             self.current_color = matched
@@ -512,7 +538,7 @@ class AcerAlgRgbWindow(QMainWindow):
         rgb = hex_to_rgb(text)
         if rgb:
             nearest = find_nearest_preset(*rgb)
-            self.current_preview_dot.setStyleSheet(f"background-color: {text}; border-radius: 14px; border: 1px solid #ffffff40;")
+            self.custom_preview_dot.setStyleSheet(f"background-color: {text}; border-radius: 14px; border: 1px solid #ffffff40;")
             self.firmware_match_dot.setStyleSheet(f"background-color: {nearest.hex_code}; border-radius: 14px; border: 1px solid #ffffff40;")
             self.lbl_match_title.setText(f"Firmware Preset: {nearest.label} ({nearest.hex_code})")
 
@@ -559,12 +585,11 @@ class AcerAlgRgbWindow(QMainWindow):
 
     def toggle_power(self):
         if self.power_on:
-            # Turn off
             success, msg = turn_off()
             if success:
                 self.power_on = False
                 self.preview_widget.set_lighting(COLOR_OFF, 0, is_applied=True)
-                self.btn_power_toggle.setText("Turn On")
+                self.btn_power_toggle.setText("Lighting: Turn On")
                 self.btn_power_toggle.setStyleSheet("background-color: #1e3a2f; color: #a6e3a1; border: 1px solid #10b981;")
                 self.set_applied_indicator(True, is_off=True)
                 self.tray.set_state(COLOR_OFF, 0)
@@ -572,7 +597,6 @@ class AcerAlgRgbWindow(QMainWindow):
             else:
                 QMessageBox.critical(self, "Power Off Failed", f"Could not power off lighting:\n{msg}")
         else:
-            # Turn on / restore
             self.power_on = True
             if self.current_brightness == 0:
                 self.current_brightness = 4
@@ -590,7 +614,6 @@ class AcerAlgRgbWindow(QMainWindow):
             self.config.set("last_color", self.current_color.name)
             self.config.set("last_brightness", self.current_brightness)
 
-            # Update autostart if configured
             if self.config.get("restore_on_login", False):
                 cli = find_cli_path() or "alg-rgb"
                 self.config.set_autostart(True, self.current_color.name, self.current_brightness, cli)
@@ -610,34 +633,29 @@ class AcerAlgRgbWindow(QMainWindow):
             self.apply_current_settings()
 
     def _update_ui_state(self, is_applied: bool):
-        # Update preset swatches selection styling
         for btn in self.swatch_buttons:
             btn.update_selection_style(btn.color_item.name == self.current_color.name)
 
-        # Update summary strip
         self.strip_color_dot.setStyleSheet(f"background-color: {self.current_color.hex_code}; border-radius: 7px;")
         self.strip_color_label.setText(f"Color: {self.current_color.label} ({self.current_color.hex_code})")
         self._update_brightness_text(self.current_brightness)
 
-        # Update custom match preview
         self.custom_preview_dot.setStyleSheet(f"background-color: {self.current_color.hex_code}; border-radius: 14px; border: 1px solid #ffffff40;")
         self.firmware_match_dot.setStyleSheet(f"background-color: {self.current_color.hex_code}; border-radius: 14px; border: 1px solid #ffffff40;")
         self.lbl_match_title.setText(f"Firmware Preset: {self.current_color.label} ({self.current_color.hex_code})")
 
-        # Slider and power toggle button
         self.slider.blockSignals(True)
         self.slider.setValue(self.current_brightness)
         self.slider.blockSignals(False)
 
         if self.power_on:
-            self.btn_power_toggle.setText("Turn Off")
+            self.btn_power_toggle.setText("Lighting: Turn Off")
             self.btn_power_toggle.setStyleSheet("")
             self.btn_power_toggle.setProperty("class", "offButton")
         else:
-            self.btn_power_toggle.setText("Turn On")
+            self.btn_power_toggle.setText("Lighting: Turn On")
             self.btn_power_toggle.setStyleSheet("background-color: #1e3a2f; color: #a6e3a1; border: 1px solid #10b981;")
 
-        # Update keyboard preview widget
         self.preview_widget.set_lighting(self.current_color, self.current_brightness, is_applied)
         self.tray.set_state(self.current_color, self.current_brightness if self.power_on else 0)
         self.set_applied_indicator(is_applied, is_off=not self.power_on)
@@ -706,15 +724,17 @@ class AcerAlgRgbWindow(QMainWindow):
             event.ignore()
             self.hide()
             self.tray.showMessage(
-                "Acer ALG RGB",
+                "Acer ALG Control Center",
                 "Application minimized to system tray.",
                 QSystemTrayIcon.MessageIcon.Information,
                 1500
             )
         else:
+            self.fan_widget.stop_monitoring()
             event.accept()
 
     def force_quit(self):
         self.diag_timer.stop()
         self.apply_timer.stop()
+        self.fan_widget.stop_monitoring()
         QApplication.quit()

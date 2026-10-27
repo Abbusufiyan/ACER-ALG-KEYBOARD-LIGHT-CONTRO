@@ -21,6 +21,8 @@ from alg_rgb_gui.colors import (
 )
 from alg_rgb_gui.config import ConfigManager
 from alg_rgb_gui.backend import read_diagnostics, find_cli_path
+from alg_rgb_gui.sensors import SensorEngine
+from alg_rgb_gui.thermal_graph import TemperatureHistoryGraph
 
 
 class TestColors(unittest.TestCase):
@@ -102,6 +104,40 @@ class TestConfig(unittest.TestCase):
             cfg.config["last_brightness"] = 2
             self.assertEqual(cfg.get("last_color"), "cyan")
             self.assertEqual(cfg.get("last_brightness"), 2)
+
+
+class TestSensors(unittest.TestCase):
+    def test_sensor_engine_reading(self):
+        """Test read-only sensor telemetry gathering."""
+        engine = SensorEngine()
+        cpu = engine.read_cpu_telemetry()
+        self.assertIsInstance(cpu.package_temp, float)
+        self.assertTrue(cpu.sensor_found)
+        self.assertGreater(len(cpu.cores), 0)
+
+        gpu = engine.read_gpu_telemetry()
+        self.assertIsInstance(gpu.available, bool)
+        if gpu.available:
+            self.assertGreaterEqual(gpu.temp_c, 0.0)
+
+        aux = engine.read_auxiliary_temperatures()
+        self.assertIsInstance(aux, dict)
+
+        fan_status = engine.get_fan_hardware_status()
+        self.assertEqual(fan_status.mode, "Firmware Automatic (EC Managed)")
+        self.assertFalse(fan_status.manual_control_supported)
+
+
+class TestThermalGraph(unittest.TestCase):
+    def test_graph_data_accumulation(self):
+        """Test rolling queue point accumulation."""
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        graph = TemperatureHistoryGraph(max_points=30)
+        graph.add_sample(65.0, 50.0)
+        self.assertEqual(graph.last_cpu, 65.0)
+        self.assertEqual(graph.last_gpu, 50.0)
+        self.assertEqual(len(graph.history), 30)
 
 
 if __name__ == "__main__":
