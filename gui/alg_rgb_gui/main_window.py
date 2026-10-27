@@ -10,7 +10,8 @@ from typing import Optional, List
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QSlider, QTabWidget, QLineEdit, QCheckBox,
-    QColorDialog, QScrollArea, QFrame, QMessageBox, QApplication
+    QColorDialog, QScrollArea, QFrame, QMessageBox, QApplication,
+    QSystemTrayIcon
 )
 from PyQt6.QtGui import QIcon, QColor, QFont
 from PyQt6.QtCore import Qt, QTimer
