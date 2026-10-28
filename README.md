@@ -1,104 +1,109 @@
-# Acer ALG Control Center — RGB Keyboard & Thermal Monitor
+# Acer ALG Control Center — RGB Keyboard & Dual Fan Control
 
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL%202.0-blue.svg)](LICENSE)
 [![Platform: Arch Linux](https://img.shields.io/badge/Platform-Arch%20Linux-1793d1.svg)](https://archlinux.org)
 [![Desktop: KDE Plasma 6](https://img.shields.io/badge/Desktop-KDE%20Plasma%206-1d99f3.svg)](https://kde.org/plasma-desktop/)
 [![Framework: PyQt6](https://img.shields.io/badge/GUI-PyQt6-41cd52.svg)](https://riverbankcomputing.com/software/pyqt/)
+[![Driver: DKMS](https://img.shields.io/badge/Kernel-DKMS%20v0.1.4-orange.svg)](dkms.conf)
 
-A native Linux hardware utility and graphical control center designed for **Acer ALG laptops** (such as the **Acer ALG AL15G-52** and **AL15G-53**).
+A native Linux hardware utility and graphical control center designed specifically for **Acer ALG laptops** (such as the **Acer ALG AL15G-52** and **AL15G-53**).
 
-Provides complete built-in RGB keyboard backlight control, real-time CPU & NVIDIA GPU thermal telemetry, rolling temperature history graphing, and firmware cooling status.
+Provides complete built-in RGB keyboard backlight control, genuine dual fan speed control (independent CPU Fan 1 & GPU Fan 2), dynamic thermal curves, real-time CPU & NVIDIA GPU telemetry, rolling temperature history graphing, and fail-safe firmware protection.
 
 ---
 
 ## Architecture Overview
 
-On Acer ALG series laptops, hardware management is traditionally restricted to vendor Windows software communicating through proprietary ACPI bridges (`AcpiBridge.sys`).
+On Acer ALG laptops, hardware management is traditionally locked to proprietary Windows software through vendor ACPI methods (`AcpiBridge.sys`). 
 
-This project bridges hardware control under Linux using verified, reverse-engineered kernel interfaces and non-blocking telemetry:
+This project bridges hardware control under Linux using reverse-engineered, verified ACPI contracts and separate character device interfaces to prevent hardware command collisions:
 
 ```text
-┌────────────────────────────────────────────────────────┐
-│             Acer ALG Control Center                    │
-│        (PyQt6 / Wayland / KDE Plasma 6)                │
-└──────────────┬──────────────────────────┬──────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Acer ALG Control Center                         │
+│                    (PyQt6 / Wayland / KDE Plasma 6)                    │
+└──────────────┬──────────────────────────┬──────────────────────────────┘
                │                          │
-       [Keyboard RGB]               [Thermals & Fans]
+       [Keyboard RGB]             [Dual Fan Control]
                │                          │
                ▼                          ▼
-┌──────────────────────────┐  ┌──────────────────────────┐
-│       alg-rgb CLI        │  │   Sensor Telemetry Engine│
-│   (/usr/local/bin/alg-rgb)│  │ (coretemp, nvidia-smi,   │
-└──────────────┬───────────┘  │  nvme, acpitz)           │
-               │              └──────────────────────────┘
-               ▼
-┌──────────────────────────┐
-│   Device: /dev/alg_rgb   │
-│ (Mode 0660, alg-rgb grp) │
-└──────────────┬───────────┘
-               │
-               ▼
-┌──────────────────────────┐
-│    alg_rgb Kernel Driver │
-│ (Function 0x67 DSM call) │
-└──────────────┬───────────┘
-               │
-               ▼
-┌──────────────────────────┐
-│ ACPI: \_SB.DCHU (CLV0001)│
-└──────────────┬───────────┘
-               │
-               ▼
-┌──────────────────────────┐
-│  Embedded Controller (EC)│
-│ [C4 0D/0E/02, CA 07/03]  │
-└──────────────────────────┘
+┌──────────────────────────┐   ┌──────────────────────────┐
+│       alg-rgb CLI        │   │       alg-fan CLI        │
+│ (/usr/local/bin/alg-rgb) │   │ (/usr/local/bin/alg-fan) │
+└──────────────┬───────────┘   └──────────┬───────────────┘
+               │                          │
+               ▼                          ▼
+┌──────────────────────────┐   ┌──────────────────────────┐
+│   Device: /dev/alg_rgb   │   │   Device: /dev/alg_fan   │
+│ (Mode 0660, alg-rgb grp) │   │ (Mode 0660, alg-rgb grp) │
+└──────────────┬───────────┘   └──────────┬───────────────┘
+               │                          │
+               │   ┌──────────────────────┴┐
+               │   │                       │
+               ▼   ▼                       ▼
+┌─────────────────────────────────────────────────────────┐
+│               alg_rgb Kernel Module (DKMS)              │
+│       Function 0x67 (RGB)  │  Functions 0x68 & 0x69     │
+└──────────────┬──────────────────────────┬───────────────┘
+               │                          │
+               ▼                          ▼
+┌─────────────────────────────────────────────────────────┐
+│              ACPI Device: \_SB.DCHU (CLV0001:00)         │
+│          UUID: 93f224e4-fbdc-4bbf-add6-db71bdc0afad     │
+└──────────────┬──────────────────────────┬───────────────┘
+               │                          │
+               ▼                          ▼
+┌──────────────────────────┐   ┌──────────────────────────┐
+│  EC Lighting Controller  │   │     EC Fan Mailbox       │
+│  Backlight & Zone Colors │   │   Opcode 0xC1 Actuation  │
+│  [C4 0D/0E/02, CA 07/03] │   │ [Fan 1: CPU, Fan 2: GPU] │
+└──────────────────────────┘   └──────────────────────────┘
 ```
 
 ---
 
 ## Features
 
-### ⌨️ Keyboard RGB Control
-- **Interactive Keyboard Glow Preview**: Stylized laptop keyboard rendering dynamic ambient light and keycap underglow matching the active RGB color and brightness.
+### ❄️ Dual Fan Speed Control & Cooling Management
+- **5 Operational Profiles**:
+  - ⚡ **Auto Mode**: Restores autonomous firmware closed-loop cooling (`SCMD 0x69`, payload `0x03`).
+  - 🌙 **Silent Profile**: Quiet dynamic curve prioritizing low acoustics during light tasks.
+  - ⚖️ **Balanced Profile**: Default adaptive curve balancing thermals and noise.
+  - 🚀 **Performance Profile**: Aggressive cooling curve for gaming and heavy compilation.
+  - 🛠️ **Custom Mode**: Fully adjustable manual sliders for independent CPU Fan 1 and GPU Fan 2.
+- **Independent CPU & GPU Control**: Verified via DSDT bytecode — CPU Fan 1 (Byte 0) and GPU Fan 2 (Byte 1) are individually addressable in hardware.
+- **🔗 Link CPU & GPU Fan Speeds**: Toggle sync locking to adjust both fans together or decouple them for custom independent tuning.
+- **Quick Preset Buttons**: One-click duty targets: `Min (25%)`, `50%`, `75%`, `Max (100%)`.
+- **Motor Stall Prevention**: Enforces a strict hardware safety floor of **minimum 25% duty** (raw byte `0x40`) in both the kernel driver and userspace.
+- **Emergency Thermal Override**: Automatically engages 100% cooling priority if CPU DTS reaches $\ge 90^\circ\text{C}$ or NVIDIA GPU reaches $\ge 85^\circ\text{C}$.
+- **Fail-Safe Cleanup**: Automatically restores firmware automatic mode on application close, force quit, or kernel module unload.
+
+### ⌨️ Keyboard RGB Backlight Control
+- **Interactive Keyboard Glow Preview**: Stylized laptop keyboard rendering dynamic ambient glow and keycap lighting matching the active RGB color and brightness.
 - **16 Calibrated Color Presets**: One-click selection of all firmware-supported colors with hex codes.
 - **Visual Color Picker & Hex Input**: Select arbitrary colors via visual dialog or hex (`#RRGGBB`). An integrated perceptual color-distance algorithm automatically selects the closest calibrated firmware preset.
 - **Debounced Brightness Slider**: 5 discrete levels (`Off`, `25%`, `50%`, `75%`, `100%`) debounced to protect the ACPI/EC mailbox from rapid input spam.
 - **Power Controls**: Single-click "Turn Off" button and "Turn On / Restore" functionality.
 - **KDE Plasma 6 System Tray**: Taskbar icon dynamically tinted with the active keyboard color, featuring quick presets, brightness levels, and power toggles.
 
-### ❄️ Thermals & Fan Monitoring
-- **Real-Time CPU Package & Core Temperatures**: Individual tracking for Intel Alder Lake-P Package and all 8 performance/efficiency cores via kernel `coretemp`.
+### 📊 Real-Time Telemetry & Monitoring
+- **Real-Time CPU Core Thermals**: Individual tracking for Intel Alder Lake-P Package and all 8 performance/efficiency cores via kernel `coretemp`.
 - **NVIDIA GeForce RTX 2050 Telemetry**: Live GPU core temperature, GPU utilization %, power draw (Watts), and VRAM allocation via `nvidia-smi`.
 - **Storage & System Thermals**: Live monitoring of NVMe SSD temperature, ACPI motherboard thermal zone, and Wi-Fi module.
-- **Live 60-Second Rolling Temperature Graph**: Animated canvas plotting continuous temperature curves for both CPU and GPU against warning (85°C) and critical (100°C) thresholds.
-- **Firmware Cooling & Fan Protection Status**: Transparently reports the active Embedded Controller cooling policy and thermal protection state.
-
-### ⚙️ Diagnostics & Preferences
-- Non-intrusively monitors `/dev/alg_rgb` status, ACPI return status, and driver parameters without altering hardware state.
-- **Optional Login Restore**: Optional autostart preference (`~/.config/autostart/alg-rgb-restore.desktop`) to reapply your preferred color and brightness on desktop login.
-- **Minimize to Tray on Close**: Keeps the application accessible in the KDE Plasma taskbar.
-
-### Command-Line Interface (`alg-rgb`)
-- Fast, dependency-free C binary for scripting and terminal usage.
-- Strict input validation and descriptive error messages for unsupported firmware responses.
-- Diagnostic inspection via `alg-rgb --diag`.
-
-### Kernel Driver (`alg_rgb.ko`)
-- Automatically registers `/dev/alg_rgb` character device with udev rules for group `alg-rgb`.
-- Pure Function `0x67` implementation: does not issue unverified experimental ACPI calls.
-- Strict ACPI return validation: distinguishes confirmed success (`0x67`), unsupported operations (`0x80000002`), and protocol errors.
+- **Live 60-Second Rolling Temperature Graph**: Continuous dual-curve plotting for both CPU and GPU against warning (85°C) and critical (100°C) thresholds.
+- **Honest Hardware Reporting**: Standard Linux `hwmon` does not expose fan tachometer pulse channels on this chassis. The interface honestly reports `"Tachometer: N/A"` rather than displaying fabricated RPM numbers.
 
 ---
 
 ## Supported Hardware & Environment
 
 - **Laptop Models**:
-  - Acer ALG AL15G-52 (Board: `Aspire Lite AL15G-52`) — *Verified*
-  - Acer ALG AL15G-53 — *Verified*
-- **ACPI Device**: `CLV0001` (`\_SB.DCHU`)
-- **Operating System**: Arch Linux (Linux Kernel 6.x / 7.x)
-- **Desktop Environment**: KDE Plasma 6 on Wayland (also works on X11 and other desktop environments)
+  - Acer ALG AL15G-52 (Board: `Aspire Lite AL15G-52`, BIOS `1.07.01RAC2`) — *Fully Verified*
+  - Acer ALG AL15G-53 — *Supported*
+- **ACPI Hardware ID**: `CLV0001:00` (`\_SB.DCHU`)
+- **Processors**: Intel Core i5-12450H (Alder Lake-P) + NVIDIA GeForce RTX 2050 Mobile
+- **Operating System**: Arch Linux (Kernel 6.x / 7.x)
+- **Desktop Environment**: KDE Plasma 6 on Wayland (also works on X11 and other DEs)
 
 ---
 
@@ -136,20 +141,15 @@ The laptop embedded controller expects calibrated colors in internal `GRB` order
 
 ---
 
-## Prerequisites & Dependencies
+## Installation
 
-On Arch Linux, ensure the base build tools, kernel headers, and Python PyQt6 packages are installed:
-
+### Prerequisites (Arch Linux)
+Ensure kernel headers and dependencies are installed:
 ```bash
 sudo pacman -S --needed base-devel linux-headers dkms python python-pyqt6
 ```
 
----
-
-## Installation
-
-### 1. Full System Installation (Driver + CLI + GUI)
-
+### Full System Installation (Driver + CLI + GUI)
 Clone the repository and run the installer:
 
 ```bash
@@ -159,42 +159,50 @@ sudo ./install.sh
 ```
 
 The installer will:
-1. Verify the kernel module compiles cleanly against running headers before touching DKMS.
-2. Build and install the `alg-rgb` CLI to `/usr/local/bin/alg-rgb`.
-3. Create the `alg-rgb` system group and configure udev permissions (`0660`).
-4. Register and install the `alg-rgb` DKMS kernel module.
+1. Verify the kernel module compiles cleanly before touching DKMS.
+2. Build and install both `alg-rgb` and `alg-fan` CLI utilities to `/usr/local/bin/`.
+3. Create the `alg-rgb` system group and configure udev rules (`0660`) for `/dev/alg_*`.
+4. Register and install the `alg-rgb` DKMS kernel module (version `0.1.4`).
 5. Configure module auto-loading on boot (`/etc/modules-load.d/alg_rgb.conf`).
-6. Install the GUI application, launcher binary, scalable icon, and desktop entry.
+6. Register the desktop application, launcher binary, scalable icon, and menu entries.
 
-### 2. GUI-Only Installation (For Non-Root Updates)
-
-If the driver and CLI are already installed, the GUI can be installed or updated for your user account without root:
-
+### User GUI-Only Update
+If the driver and CLI are already installed:
 ```bash
-cd gui
-./install-gui.sh
+./gui/install-gui.sh
 ```
 
 ---
 
-## Launching the Application
+## Launching & Usage
 
-### From KDE Plasma / Application Menu
-Open Kickoff or KRunner (`Alt+Space`) and search for:
-> **Acer ALG RGB**
+### Launching the Graphical Interface
+- **From Application Menu**: Search for **Acer ALG Control Center** in Kickoff / KRunner (`Alt+Space`).
+- **From Terminal**:
+  ```bash
+  alg-rgb-gui
+  ```
+- **Launch Minimized to System Tray**:
+  ```bash
+  alg-rgb-gui --minimized
+  ```
 
-### From the Terminal
-Launch the GUI:
+### CLI Fan Control (`alg-fan`)
 ```bash
-alg-rgb-gui
+# Restore firmware closed-loop automatic cooling
+alg-fan auto
+
+# Set both CPU and GPU fans to 50%
+alg-fan 50
+
+# Set independent speeds: CPU Fan 1 = 40%, GPU Fan 2 = 60%
+alg-fan 40 60
+
+# View fan diagnostic status
+alg-fan --diag
 ```
 
-Launch directly minimized to the system tray:
-```bash
-alg-rgb-gui --minimized
-```
-
-### CLI Usage
+### CLI Keyboard RGB Control (`alg-rgb`)
 ```bash
 # Set color at maximum brightness
 alg-rgb red
@@ -208,99 +216,34 @@ alg-rgb orange 3
 # Turn off lighting
 alg-rgb off
 
-# Run diagnostics
+# View RGB diagnostic status
 alg-rgb --diag
+```
+
+---
+
+## Automated Tests & Verification
+
+Run the test suite to verify curves, clamping, conversions, and file IO:
+```bash
+python3 -m unittest discover -s gui/tests
+```
+
+Expected output:
+```text
+Ran 21 tests in 0.282s
+OK
 ```
 
 ---
 
 ## Uninstallation
 
-To remove the complete driver, DKMS registration, CLI, and GUI:
-
+To remove the kernel driver, DKMS module, CLI utilities, and desktop application:
 ```bash
 cd ACER-ALG-KEYBOARD-LIGHT-CONTRO
 sudo ./uninstall.sh
 ```
-
-To remove only the GUI desktop integration:
-
-```bash
-cd gui
-./uninstall-gui.sh
-```
-
----
-
-## Verification & Automated Tests
-
-Run the unit test suite to verify color algorithms, hex conversions, and diagnostic parsers:
-
-```bash
-python3 gui/tests/test_gui.py
-```
-
-Run CLI diagnostics:
-
-```bash
-alg-rgb --diag
-```
-
-Expected diagnostic output:
-
-```text
-[*] ACPI Namespace:
-    CLV0001:00 (\_SB.DCHU): PRESENT (Status: 15)
-[*] Kernel Driver & Device Node:
-    Kernel Module:  alg_rgb is LOADED
-    Device Node:    /dev/alg_rgb EXISTS
-    Driver Diagnostic Data:
-      driver_version: 0.1.3
-      acpi_device: \_SB.DCHU (CLV0001)
-      acpi_handle_bound: yes
-      last_acpi_status: 0 (SUCCESS (firmware accepted last call))
-      software_state: ON
-```
-
----
-
-## Troubleshooting
-
-### 1. Permission Denied opening `/dev/alg_rgb`
-Ensure your user account belongs to the `alg-rgb` group:
-```bash
-sudo usermod -aG alg-rgb $USER
-```
-Log out and log back in for group membership to take effect.
-
-### 2. Device `/dev/alg_rgb` Does Not Exist
-Check if the kernel module is loaded:
-```bash
-lsmod | grep alg_rgb
-```
-If not loaded, load it manually:
-```bash
-sudo modprobe alg_rgb
-```
-
-### 3. Check Kernel Diagnostic Logs
-Inspect driver kernel log entries:
-```bash
-journalctl -k -b 0 | grep alg-rgb
-```
-
----
-
-## Hardware Safety & Limitations
-
-- **ACPI Isolation**: This driver communicates only via ACPI `_DSM` Function `0x67`. Unknown experimental functions (such as `0x68`, `0x69`, `0x6A`) are intentionally not exposed to prevent hardware lockups.
-- **Physical Output**: Software delivery of ACPI commands does not automatically guarantee physical LED output if physical keyboard wiring differs or if an EC hardware switch is triggered. Physical illumination must be confirmed visually.
-
----
-
-## Contributing
-
-Contributions, bug reports, and hardware compatibility testing on other Acer ALG models are welcome. Please open an issue or pull request with your `uname -r`, DMI board name (`cat /sys/class/dmi/id/board_name`), and diagnostic logs.
 
 ---
 

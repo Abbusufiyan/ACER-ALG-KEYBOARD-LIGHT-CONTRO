@@ -1,11 +1,11 @@
 [Desktop Entry]
 Name=Acer ALG Control Center
-GenericName=RGB & Thermal Control Center
-Comment=Control RGB keyboard lighting and monitor thermals on Acer ALG laptops
+GenericName=RGB & Fan Control Center
+Comment=Control RGB keyboard lighting and dual fan cooling on Acer ALG laptops
 Exec=alg-rgb-gui
 Icon=alg-rgb-gui
 Terminal=false
 Type=Application
 Categories=Settings;HardwareSettings;Qt;
-Keywords=rgb;keyboard;backlight;fan;thermal;temperature;acer;alg;lighting;
+Keywords=rgb;keyboard;backlight;fan;cooling;thermal;temperature;acer;alg;lighting;
 StartupWMClass=alg-rgb-gui
