@@ -121,12 +121,13 @@ class HardwareReportDialog(QDialog):
             "- Mainline Linux kernel does not expose a standard `hwmon` PWM knob for `CLV0001:00`.\n"
             "- Standard fan tools (`fancontrol`, `pwmconfig`) require `/sys/class/hwmon/hwmon*/pwm*` which are unavailable.\n"
             "- Native ACPI method dispatch through `\\_SB.DCHU._DSM` is the only supported hardware communication channel.\n\n"
-            "## 5. Phase 2 Safety Guarantee (Zero Unapproved Hardware Writes)\n"
-            "- `hardware_writes_enabled = False` is strictly enforced throughout Phase 2.\n"
-            "- All curves, custom duty percentages, and payload buffers are fully verified and simulated.\n"
-            "- Minimum duty is clamped to 25% (0x40) to prevent fan motor stall.\n"
-            "- Emergency safety floor automatically prioritizes 100% cooling if CPU ≥ 90°C or GPU ≥ 85°C.\n"
-            "- Actual ACPI hardware execution is gated until Phase 3 user approval."
+            "## 5. Thermal Safety & Hardware Invariants\n"
+            "- Dedicated character device `/dev/alg_fan` isolates cooling commands from keyboard lighting.\n"
+            "- Minimum duty is clamped to 25% (0x40 / raw 64) in both kernel and userspace to prevent fan motor stall.\n"
+            "- Intelligent 10-second rolling-average monitoring: 10s average ≥ 80°C or peak ≥ 85°C sustained for ≥ 3s triggers 100% cooling.\n"
+            "- Transient spike filtering: brief 1-second boost spikes do not trigger loud fan oscillations.\n"
+            "- Hysteresis recovery: normal fan operation restores when rolling average < 75°C and peak < 80°C.\n"
+            "- Fail-safe exit: automatically restores firmware automatic mode (SCMD 0x69) on application close, crash, or driver reload."
         )
 
 
@@ -803,14 +804,14 @@ class ThermalsAndFanWidget(QWidget):
         self.graph_widget.add_sample(cpu_temp, gpu.temp_c if gpu.available else 0.0)
 
         # 4. Periodic tick for fan controller curves and emergency floor
-        snapshot = self.fan_controller.tick_thermal_update(cpu_temp, gpu_temp)
+        all_sensors = self.sensor_engine.read_all_sensors(cpu=cpu, gpu=gpu)
+        snapshot = self.fan_controller.tick_thermal_update(cpu_temp, gpu_temp, all_sensors=all_sensors)
 
         # Emergency Banner Visibility
         if snapshot.get("emergency_override", False):
             self.emergency_card.setVisible(True)
             self.lbl_emergency_text.setText(
-                f"CRITICAL THERMAL EVENT: CPU={cpu_temp:.0f}°C, GPU={gpu_temp:.0f}°C exceeded emergency limits. "
-                "100% cooling override engaged!"
+                snapshot.get("status_message", "100% cooling override engaged!")
             )
         else:
             self.emergency_card.setVisible(False)

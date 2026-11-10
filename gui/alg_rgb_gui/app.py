@@ -14,7 +14,7 @@ from .config import ConfigManager
 
 APP_ID = "alg-rgb-gui"
 APP_NAME = "Acer ALG RGB"
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4"
 
 
 def main():

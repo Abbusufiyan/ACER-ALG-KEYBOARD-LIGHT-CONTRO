@@ -17,6 +17,8 @@ import os
 import shutil
 import subprocess
 import math
+import time
+from collections import deque
 from enum import Enum
 from typing import Dict, Any, List, Tuple, Optional
 
@@ -78,6 +80,14 @@ MIN_SAFE_MANUAL_DUTY_PCT = 25  # Prevents fan motor stall / insufficient start t
 MAX_SAFE_MANUAL_DUTY_PCT = 100
 EMERGENCY_TEMP_THRESHOLD_CPU = 90.0
 EMERGENCY_TEMP_THRESHOLD_GPU = 85.0
+
+# Smarter Automatic Monitoring Thresholds
+ROLLING_WINDOW_DURATION_SEC = 10.0   # 10-second rolling window
+ROLLING_AVG_TRIGGER_TEMP = 80.0       # Trigger max fan speed when 10-sec average reaches 80°C
+SUSTAINED_HIGH_TEMP_THRESHOLD = 85.0  # Instantaneous threshold for sustained spike check
+SUSTAINED_HIGH_TEMP_DURATION_SEC = 3.0 # Must remain above 85°C for >= 3 seconds
+RECOVERY_AVG_THRESHOLD = 75.0         # 5°C hysteresis: rolling averages must fall below 75°C
+RECOVERY_PEAK_THRESHOLD = 80.0        # 5°C hysteresis: instantaneous peaks must fall below 80°C
 
 
 def clamp_duty(pct: int) -> int:
@@ -263,7 +273,7 @@ class FanHardwareBackend:
 
 class FanControllerEngine:
     """
-    High-level fan controller engine managing modes, curves, and thermal updates.
+    High-level fan controller engine managing modes, curves, rolling sensor averages, and thermal safety.
     """
 
     def __init__(self, backend: Optional[FanHardwareBackend] = None):
@@ -276,6 +286,12 @@ class FanControllerEngine:
         self.active_cpu_target_pct = 50
         self.active_gpu_target_pct = 50
         self.emergency_override = False
+        self.high_temp_start_time: Optional[float] = None
+
+        # Continuous multi-sensor 10-second rolling history: {sensor_name: deque([(timestamp, temp), ...])}
+        self.sensor_windows: Dict[str, deque] = {}
+        self.sensor_averages: Dict[str, float] = {}
+
         self.last_status_message = "Firmware Automatic (EC Closed-Loop Active)"
 
     def set_sync_fans(self, sync: bool):
@@ -289,6 +305,9 @@ class FanControllerEngine:
     def set_mode(self, mode: FanMode) -> Tuple[bool, str]:
         """Switch operational fan mode."""
         self.current_mode = mode
+        self.high_temp_start_time = None
+        self.sensor_windows.clear()
+        self.sensor_averages.clear()
         if mode == FanMode.AUTO:
             self.emergency_override = False
             ok, msg = self.backend.apply_auto_mode()
@@ -338,40 +357,133 @@ class FanControllerEngine:
         else:
             target = 50
 
+        # Prevent transient curve peaks from commanding 100% maximum fan speed
+        # unless sustained high-temperature check has passed
+        if target >= 100 and not self.emergency_override:
+            target = 90
+
         self.active_cpu_target_pct = target
         self.active_gpu_target_pct = target
         ok, msg = self.backend.apply_manual_duty(target, target)
         self.last_status_message = f"Profile [{self.current_mode.value.upper()}]: {target}% target at {hottest:.0f}°C"
         return ok, msg
 
-    def tick_thermal_update(self, cpu_temp: float, gpu_temp: float) -> Dict[str, Any]:
-        """Periodic thermal update tick called on sensor poll (1-2s interval)."""
-        # 1. Emergency Safety Floor Check
-        if cpu_temp >= EMERGENCY_TEMP_THRESHOLD_CPU or gpu_temp >= EMERGENCY_TEMP_THRESHOLD_GPU:
-            self.emergency_override = True
-            # Revert to full auto firmware protection or max cooling
-            self.backend.apply_manual_duty(100, 100)
+    def tick_thermal_update(
+        self,
+        cpu_temp: float,
+        gpu_temp: float,
+        now: Optional[float] = None,
+        all_sensors: Optional[Dict[str, float]] = None
+    ) -> Dict[str, Any]:
+        """
+        Continuous thermal update tick called approximately every 1 second.
+        Maintains a rolling 10-second monitoring window across all monitored sensors.
+        Triggers maximum fan speed if:
+          1. Any relevant sensor's 10-second rolling average reaches >= 80.0°C.
+          2. Any relevant sensor remains >= 85.0°C for a sustained period (>= 3 consecutive seconds).
+        Resets high-temperature timer when temperatures fall below 85.0°C.
+        Restores normal control when temperatures cool down with hysteresis.
+        """
+        current_time = now if now is not None else time.monotonic()
+
+        # Build unified sensor reading map
+        sensors: Dict[str, float] = dict(all_sensors) if all_sensors else {}
+        if "CPU Package" not in sensors:
+            sensors["CPU Package"] = float(cpu_temp)
+        if "GPU Core" not in sensors and "GPU" not in sensors:
+            sensors["GPU Core"] = float(gpu_temp)
+
+        # 1. Update rolling 10-second window for each sensor
+        self.sensor_averages.clear()
+        for name, val in sensors.items():
+            if name not in self.sensor_windows:
+                self.sensor_windows[name] = deque()
+            win = self.sensor_windows[name]
+            win.append((current_time, float(val)))
+            # Prune samples older than 10 seconds
+            while win and (current_time - win[0][0]) > ROLLING_WINDOW_DURATION_SEC:
+                win.popleft()
+            # Calculate 10-second rolling average
+            if win:
+                self.sensor_averages[name] = sum(v for t, v in win) / len(win)
+
+        # 2. Identify instantaneous hottest sensor and maximum 10-second rolling average
+        hottest_instant = max(sensors.values()) if sensors else max(cpu_temp, gpu_temp)
+        max_avg_sensor = max(self.sensor_averages, key=self.sensor_averages.get) if self.sensor_averages else "CPU Package"
+        max_avg_val = self.sensor_averages.get(max_avg_sensor, 0.0)
+
+        # 3. Check Sustained >= 85°C Condition (any sensor >= 85°C for >= 3 seconds)
+        is_above_85 = hottest_instant >= SUSTAINED_HIGH_TEMP_THRESHOLD
+        if is_above_85:
+            if self.high_temp_start_time is None:
+                self.high_temp_start_time = current_time
+            sustained_elapsed = current_time - self.high_temp_start_time
+            is_sustained_85 = sustained_elapsed >= SUSTAINED_HIGH_TEMP_DURATION_SEC
+        else:
+            # Reset high-temperature timer immediately when temperatures fall below 85°C
+            self.high_temp_start_time = None
+            sustained_elapsed = 0.0
+            is_sustained_85 = False
+
+        # 4. Check 10-Second Rolling Average >= 80°C Condition
+        # Requires that the window has accumulated near a full 10-second span (>= 7.0s)
+        # to ensure it represents a true 10-second rolling average
+        win_duration = 0.0
+        if max_avg_sensor in self.sensor_windows and len(self.sensor_windows[max_avg_sensor]) > 1:
+            win = self.sensor_windows[max_avg_sensor]
+            win_duration = win[-1][0] - win[0][0]
+
+        is_avg_80 = (max_avg_val >= ROLLING_AVG_TRIGGER_TEMP and win_duration >= 7.0)
+
+        # 5. Evaluate Maximum Fan Speed Trigger
+        if is_avg_80 or is_sustained_85:
+            if not self.emergency_override:
+                self.emergency_override = True
+                self.backend.apply_manual_duty(100, 100)
             self.active_cpu_target_pct = 100
             self.active_gpu_target_pct = 100
+
+            reasons = []
+            if is_avg_80:
+                reasons.append(f"{max_avg_sensor} 10s avg={max_avg_val:.1f}°C ≥ {ROLLING_AVG_TRIGGER_TEMP:.0f}°C")
+            if is_sustained_85:
+                reasons.append(f"peak={hottest_instant:.1f}°C sustained for {sustained_elapsed:.1f}s ≥ {SUSTAINED_HIGH_TEMP_DURATION_SEC:.0f}s")
+
             self.last_status_message = (
-                f"⚠️ EMERGENCY THERMAL SAFETY: CPU={cpu_temp:.0f}°C, GPU={gpu_temp:.0f}°C. "
-                "Forced 100% cooling to protect hardware."
+                f"⚠️ EMERGENCY THERMAL SAFETY: MAXIMUM COOLING ENGAGED ({', '.join(reasons)})."
             )
             return self.get_state_snapshot()
 
-        if self.emergency_override and (cpu_temp < 75.0 and gpu_temp < 70.0):
-            self.emergency_override = False
+        # 6. Recovery with Hysteresis
+        # Once temperatures cool down (all averages < 75°C and peak < 80°C), clear emergency override
+        was_emergency = self.emergency_override
+        if self.emergency_override:
+            if max_avg_val < RECOVERY_AVG_THRESHOLD and hottest_instant < RECOVERY_PEAK_THRESHOLD:
+                self.emergency_override = False
 
-        # 2. Normal Mode Processing
+        # If still in emergency cooldown band, maintain 100% cooling
+        if self.emergency_override:
+            self.active_cpu_target_pct = 100
+            self.active_gpu_target_pct = 100
+            return self.get_state_snapshot()
+
+        # 7. Normal Mode Processing & Clean Hardware Recovery
         if self.current_mode == FanMode.AUTO:
             self.active_cpu_target_pct = 0
             self.active_gpu_target_pct = 0
+            if was_emergency or self.backend.last_commanded_mode != "auto":
+                self.backend.apply_auto_mode()
             self.last_status_message = "Firmware Automatic (EC Closed-Loop Active)"
         elif self.current_mode in (FanMode.SILENT, FanMode.BALANCED, FanMode.PERFORMANCE):
             self.update_preset_duty(cpu_temp, gpu_temp)
         elif self.current_mode == FanMode.CUSTOM:
             self.active_cpu_target_pct = self.custom_cpu_duty
             self.active_gpu_target_pct = self.custom_gpu_duty
+            if (was_emergency or
+                    self.backend.last_commanded_mode != "manual" or
+                    self.backend.last_commanded_cpu_raw != pct_to_raw(self.custom_cpu_duty) or
+                    self.backend.last_commanded_gpu_raw != pct_to_raw(self.custom_gpu_duty)):
+                self.apply_custom_duty()
 
         return self.get_state_snapshot()
 
@@ -389,4 +501,6 @@ class FanControllerEngine:
             "emergency_override": self.emergency_override,
             "status_message": self.last_status_message,
             "hardware_writes_enabled": self.backend.hardware_writes_enabled,
+            "high_temp_timer_active": self.high_temp_start_time is not None,
+            "sensor_averages": dict(self.sensor_averages),
         }

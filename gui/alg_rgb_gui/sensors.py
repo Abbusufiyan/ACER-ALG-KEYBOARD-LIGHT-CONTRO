@@ -190,6 +190,30 @@ class SensorEngine:
 
         return results
 
+    def read_all_sensors(
+        self,
+        cpu: Optional[CpuTelemetry] = None,
+        gpu: Optional[GpuTelemetry] = None
+    ) -> Dict[str, float]:
+        """Read all available hardware thermal sensors into a unified telemetry map."""
+        sensors: Dict[str, float] = {}
+        if cpu is None:
+            cpu = self.read_cpu_telemetry()
+        if cpu.sensor_found:
+            sensors["CPU Package"] = cpu.package_temp
+            sensors["CPU Max Core"] = cpu.max_core_temp
+            sensors["CPU Avg Core"] = cpu.avg_core_temp
+            for c in cpu.cores:
+                sensors[f"CPU {c.label}"] = c.temp_c
+        if gpu is None:
+            gpu = self.read_gpu_telemetry()
+        if gpu.available:
+            sensors["GPU Core"] = gpu.temp_c
+        aux = self.read_auxiliary_temperatures()
+        for name, val in aux.items():
+            sensors[name] = val
+        return sensors
+
     def get_fan_hardware_status(self) -> FanHardwareStatus:
         """Inspect whether any standard hwmon pwm control is available."""
         has_pwm = False

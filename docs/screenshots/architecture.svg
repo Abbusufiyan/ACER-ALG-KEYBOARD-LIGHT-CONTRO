@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 760" width="960" height="760" style="background:#14151f; font-family:'Segoe UI',Roboto,Helvetica,sans-serif;">
+  <defs>
+    <linearGradient id="gradPrimary" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="gradCard" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1e2e"/>
+      <stop offset="100%" stop-color="#181825"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#fab387"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#a6e3a1"/>
+    </marker>
+  </defs>
+
+  <!-- Title Banner -->
+  <text x="480" y="42" text-anchor="middle" fill="#f5e0dc" font-size="22" font-weight="bold">Acer ALG Control Center — Architecture</text>
+  <text x="480" y="68" text-anchor="middle" fill="#a6adc8" font-size="13">Kernel ACPI Bridge, Dual Fan Subsystem, RGB Mailbox &amp; Safety Pipeline</text>
+
+  <!-- LAYER 1: USERSPACE GUI & CLI -->
+  <rect x="40" y="95" width="880" height="125" rx="10" fill="url(#gradCard)" stroke="#313244" stroke-width="1.5" filter="url(#glow)"/>
+  <text x="60" y="122" fill="#89b4fa" font-size="14" font-weight="bold">[1] Userspace Layer</text>
+
+  <!-- GUI App -->
+  <rect x="60" y="135" width="380" height="68" rx="8" fill="#24273a" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="250" y="162" text-anchor="middle" fill="#f5e0dc" font-size="14" font-weight="bold">Acer ALG Control Center GUI</text>
+  <text x="250" y="182" text-anchor="middle" fill="#a6adc8" font-size="11">PyQt6 • KDE Plasma 6 Tray • Rolling 10s Telemetry Engine</text>
+
+  <!-- CLI Tools -->
+  <rect x="470" y="135" width="210" height="68" rx="8" fill="#24273a" stroke="#818cf8" stroke-width="1.5"/>
+  <text x="575" y="162" text-anchor="middle" fill="#cdd6f4" font-size="13" font-weight="bold">alg-rgb CLI</text>
+  <text x="575" y="182" text-anchor="middle" fill="#a6adc8" font-size="11">/usr/local/bin/alg-rgb</text>
+
+  <rect x="700" y="135" width="200" height="68" rx="8" fill="#24273a" stroke="#818cf8" stroke-width="1.5"/>
+  <text x="800" y="162" text-anchor="middle" fill="#cdd6f4" font-size="13" font-weight="bold">alg-fan CLI</text>
+  <text x="800" y="182" text-anchor="middle" fill="#a6adc8" font-size="11">/usr/local/bin/alg-fan</text>
+
+  <!-- Connecting Lines Layer 1 to 2 -->
+  <line x1="250" y1="203" x2="250" y2="255" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="575" y1="203" x2="575" y2="255" stroke="#818cf8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="800" y1="203" x2="800" y2="255" stroke="#818cf8" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- LAYER 2: CHARACTER DEVICE INTERFACES -->
+  <rect x="40" y="260" width="880" height="95" rx="10" fill="url(#gradCard)" stroke="#313244" stroke-width="1.5" filter="url(#glow)"/>
+  <text x="60" y="287" fill="#a6e3a1" font-size="14" font-weight="bold">[2] Character Device Nodes (Mode 0660, Group alg-rgb)</text>
+
+  <rect x="80" y="300" width="360" height="42" rx="6" fill="#1e2030" stroke="#45475a" stroke-width="1"/>
+  <text x="260" y="326" text-anchor="middle" fill="#a6e3a1" font-size="12" font-family="monospace">/dev/alg_rgb (Keyboard Backlight)</text>
+
+  <rect x="520" y="300" width="360" height="42" rx="6" fill="#1e2030" stroke="#45475a" stroke-width="1"/>
+  <text x="700" y="326" text-anchor="middle" fill="#a6e3a1" font-size="12" font-family="monospace">/dev/alg_fan (Dual Fan Control)</text>
+
+  <!-- Connecting Lines Layer 2 to 3 -->
+  <line x1="260" y1="342" x2="260" y2="390" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="700" y1="342" x2="700" y2="390" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- LAYER 3: KERNEL MODULE -->
+  <rect x="40" y="395" width="880" height="105" rx="10" fill="url(#gradCard)" stroke="#fab387" stroke-width="1.5" filter="url(#glow)"/>
+  <text x="60" y="422" fill="#fab387" font-size="14" font-weight="bold">[3] Linux Kernel Module: alg_rgb.ko (DKMS v0.1.4)</text>
+
+  <rect x="70" y="435" width="380" height="52" rx="6" fill="#24273a" stroke="#45475a" stroke-width="1"/>
+  <text x="260" y="457" text-anchor="middle" fill="#cdd6f4" font-size="12" font-weight="bold">ACPI Function 0x67 Dispatcher</text>
+  <text x="260" y="475" text-anchor="middle" fill="#a6adc8" font-size="10">GRB Color Conversion • Power Rail 0x40 / 0xF0 Control</text>
+
+  <rect x="510" y="435" width="380" height="52" rx="6" fill="#24273a" stroke="#45475a" stroke-width="1"/>
+  <text x="700" y="457" text-anchor="middle" fill="#cdd6f4" font-size="12" font-weight="bold">ACPI Functions 0x68 &amp; 0x69 Dispatcher</text>
+  <text x="700" y="475" text-anchor="middle" fill="#a6adc8" font-size="10">Opcode 0x68 (Manual Duty) • Opcode 0x69 (Auto Restore) • 25% Min Clamp</text>
+
+  <!-- Connecting Lines Layer 3 to 4 -->
+  <line x1="260" y1="487" x2="260" y2="535" stroke="#fab387" stroke-width="2" marker-end="url(#arrow-orange)"/>
+  <line x1="700" y1="487" x2="700" y2="535" stroke="#fab387" stroke-width="2" marker-end="url(#arrow-orange)"/>
+
+  <!-- LAYER 4: ACPI SUBSYSTEM -->
+  <rect x="40" y="540" width="880" height="75" rx="10" fill="url(#gradCard)" stroke="#cba6f7" stroke-width="1.5" filter="url(#glow)"/>
+  <text x="60" y="565" fill="#cba6f7" font-size="14" font-weight="bold">[4] ACPI DSDT Interface</text>
+  <text x="480" y="588" text-anchor="middle" fill="#f5e0dc" font-size="13" font-family="monospace">Device (\_SB.DCHU) • Hardware ID: CLV0001:00 • UUID: 93f224e4-fbdc-4bbf-add6-db71bdc0afad</text>
+
+  <!-- Connecting Lines Layer 4 to 5 -->
+  <line x1="260" y1="615" x2="260" y2="650" stroke="#cba6f7" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="700" y1="615" x2="700" y2="650" stroke="#cba6f7" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- LAYER 5: PHYSICAL HARDWARE & EMBEDDED CONTROLLER -->
+  <rect x="40" y="655" width="880" height="85" rx="10" fill="url(#gradCard)" stroke="#f38ba8" stroke-width="1.5" filter="url(#glow)"/>
+  <text x="60" y="680" fill="#f38ba8" font-size="14" font-weight="bold">[5] Embedded Controller (EC) &amp; Physical Hardware</text>
+
+  <rect x="70" y="690" width="380" height="40" rx="6" fill="#1e2030" stroke="#45475a" stroke-width="1"/>
+  <text x="260" y="715" text-anchor="middle" fill="#f5e0dc" font-size="11">RGB Lighting Rail (3-Zone Membrane Keyboard)</text>
+
+  <rect x="510" y="690" width="180" height="40" rx="6" fill="#1e2030" stroke="#45475a" stroke-width="1"/>
+  <text x="600" y="715" text-anchor="middle" fill="#38bdf8" font-size="11">CPU Fan 1 (Byte 0)</text>
+
+  <rect x="710" y="690" width="180" height="40" rx="6" fill="#1e2030" stroke="#45475a" stroke-width="1"/>
+  <text x="800" y="715" text-anchor="middle" fill="#38bdf8" font-size="11">GPU Fan 2 (Byte 1)</text>
+
+</svg>

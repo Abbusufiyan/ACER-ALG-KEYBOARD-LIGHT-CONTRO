@@ -325,22 +325,210 @@ class TestFanController(unittest.TestCase):
         self.assertEqual(engine.custom_gpu_duty, 80)
 
     def test_emergency_thermal_override(self):
-        """Test emergency 100% cooling trigger when temp >= 90C CPU or >= 85C GPU."""
+        """Test emergency 100% cooling trigger when temp sustained >= 85C for >= 3s."""
         from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
         engine = FanControllerEngine()
         engine.set_mode(FanMode.SILENT)
 
         # Normal operation: 50C
-        snapshot = engine.tick_thermal_update(50.0, 48.0)
+        snapshot = engine.tick_thermal_update(50.0, 48.0, now=0.0)
         self.assertFalse(snapshot["emergency_override"])
         self.assertLess(snapshot["active_cpu_pct"], 100)
 
-        # Critical CPU temp: 92C
-        snapshot = engine.tick_thermal_update(92.0, 50.0)
+        # Critical temp spike: 92C at t=1.0s (not yet sustained 3s)
+        snapshot = engine.tick_thermal_update(92.0, 50.0, now=1.0)
+        self.assertFalse(snapshot["emergency_override"])
+
+        # At t=2.0s: still only 1.0s elapsed
+        snapshot = engine.tick_thermal_update(92.0, 50.0, now=2.0)
+        self.assertFalse(snapshot["emergency_override"])
+
+        # Sustained at 92C at t=4.0s (sustained >= 3s from t=1.0s)
+        snapshot = engine.tick_thermal_update(92.0, 50.0, now=4.0)
         self.assertTrue(snapshot["emergency_override"])
         self.assertEqual(snapshot["active_cpu_pct"], 100)
         self.assertEqual(snapshot["active_gpu_pct"], 100)
         self.assertIn("EMERGENCY THERMAL SAFETY", snapshot["status_message"])
+
+    def test_thermal_spike_one_second(self):
+        """Test that a transient 1-second temperature spike does not trigger 100% fan."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
+        engine = FanControllerEngine()
+        engine.set_mode(FanMode.AUTO)
+
+        # Baseline: normal temp
+        snap0 = engine.tick_thermal_update(55.0, 50.0, now=10.0)
+        self.assertFalse(snap0["emergency_override"])
+        self.assertEqual(engine.backend.last_commanded_mode, "auto")
+
+        # 1-second spike to 87°C (above 85°C threshold)
+        snap1 = engine.tick_thermal_update(87.0, 50.0, now=11.0)
+        self.assertFalse(snap1["emergency_override"])
+        self.assertNotEqual(snap1["active_cpu_pct"], 100)
+        # Verify hardware backend was NOT forced to manual 100%
+        self.assertEqual(engine.backend.last_commanded_mode, "auto")
+
+    def test_thermal_sustained_three_seconds(self):
+        """Test that temperature remaining at/above 85C for >= 3s triggers 100% cooling."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
+        engine = FanControllerEngine()
+        engine.set_mode(FanMode.AUTO)
+
+        # Start sustained high temp: t=0s
+        snap0 = engine.tick_thermal_update(88.0, 52.0, now=0.0)
+        self.assertFalse(snap0["emergency_override"])
+
+        # t=1s: still high, not yet 3s
+        snap1 = engine.tick_thermal_update(88.0, 52.0, now=1.0)
+        self.assertFalse(snap1["emergency_override"])
+
+        # t=2s: still high, not yet 3s
+        snap2 = engine.tick_thermal_update(88.0, 52.0, now=2.0)
+        self.assertFalse(snap2["emergency_override"])
+
+        # t=3s: sustained for 3.0s -> trigger maximum fan speed!
+        snap3 = engine.tick_thermal_update(88.0, 52.0, now=3.0)
+        self.assertTrue(snap3["emergency_override"])
+        self.assertEqual(snap3["active_cpu_pct"], 100)
+        self.assertEqual(snap3["active_gpu_pct"], 100)
+        self.assertEqual(engine.backend.last_commanded_mode, "manual")
+        self.assertEqual(engine.backend.last_commanded_cpu_raw, 255)
+
+    def test_thermal_drop_resets_timer(self):
+        """Test that a temperature drop below 85C resets the sustained timer."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
+        engine = FanControllerEngine()
+        engine.set_mode(FanMode.AUTO)
+
+        # High temp for 2s (t=0s, t=2s)
+        engine.tick_thermal_update(87.0, 50.0, now=0.0)
+        snap1 = engine.tick_thermal_update(87.0, 50.0, now=2.0)
+        self.assertFalse(snap1["emergency_override"])
+        self.assertTrue(snap1["high_temp_timer_active"])
+
+        # Drop to 70°C at t=3s -> timer resets
+        snap2 = engine.tick_thermal_update(70.0, 50.0, now=3.0)
+        self.assertFalse(snap2["emergency_override"])
+        self.assertFalse(snap2["high_temp_timer_active"])
+
+        # New high temp spike at t=4s (1s duration) -> timer restarted from 0, not triggered
+        snap3 = engine.tick_thermal_update(87.0, 50.0, now=4.0)
+        self.assertFalse(snap3["emergency_override"])
+
+        snap4 = engine.tick_thermal_update(87.0, 50.0, now=5.0)
+        self.assertFalse(snap4["emergency_override"])
+
+    def test_thermal_recovery_restores_normal_behavior(self):
+        """Test that after sustained emergency, cooling down restores normal mode (not locked at 100%)."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode, pct_to_raw
+        engine = FanControllerEngine()
+        engine.set_mode(FanMode.AUTO)
+
+        # Trigger emergency via sustained 3s
+        engine.tick_thermal_update(89.0, 50.0, now=0.0)
+        snap_em = engine.tick_thermal_update(89.0, 50.0, now=3.0)
+        self.assertTrue(snap_em["emergency_override"])
+        self.assertEqual(engine.backend.last_commanded_mode, "manual")
+        self.assertEqual(engine.backend.last_commanded_cpu_raw, 255)
+
+        # Temperature drops below recovery threshold (80°C) -> recovers to Auto mode
+        for t in range(4, 8):
+            snap_rec = engine.tick_thermal_update(65.0, 50.0, now=float(t))
+        self.assertFalse(snap_rec["emergency_override"])
+        self.assertEqual(snap_rec["active_cpu_pct"], 0)
+        # Backend should have restored auto mode (SCMD 0x69)
+        self.assertEqual(engine.backend.last_commanded_mode, "auto")
+
+        # Test recovery in Custom mode
+        engine.set_mode(FanMode.CUSTOM)
+        engine.set_custom_duty(1, 45)
+        self.assertEqual(engine.backend.last_commanded_cpu_raw, pct_to_raw(45))
+
+        # Trigger emergency in Custom mode
+        engine.tick_thermal_update(90.0, 50.0, now=10.0)
+        engine.tick_thermal_update(90.0, 50.0, now=13.0)
+        self.assertTrue(engine.emergency_override)
+        self.assertEqual(engine.backend.last_commanded_cpu_raw, 255)
+
+        # Drop temp -> recovers custom duty 45%
+        for t in range(14, 18):
+            snap_rec_cust = engine.tick_thermal_update(60.0, 50.0, now=float(t))
+        self.assertFalse(engine.emergency_override)
+        self.assertEqual(engine.backend.last_commanded_mode, "manual")
+        self.assertEqual(engine.backend.last_commanded_cpu_raw, pct_to_raw(45))
+
+    def test_rolling_average_ten_seconds_trigger(self):
+        """Test that a sustained 10-second rolling average >= 80C triggers 100% cooling."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
+        engine = FanControllerEngine()
+        engine.set_mode(FanMode.AUTO)
+
+        # Feed 10 samples (t=0 to t=9) at 81C (average 81C >= 80C)
+        for t in range(10):
+            snap = engine.tick_thermal_update(81.0, 50.0, now=float(t))
+
+        self.assertTrue(snap["emergency_override"])
+        self.assertEqual(snap["active_cpu_pct"], 100)
+        self.assertIn("10s avg=81.0°C ≥ 80°C", snap["status_message"])
+        self.assertAlmostEqual(snap["sensor_averages"]["CPU Package"], 81.0, places=1)
+
+    def test_rolling_average_single_spike_does_not_trigger(self):
+        """Test that a single spike in a 10-second window does not cause average to reach 80C."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
+        engine = FanControllerEngine()
+        engine.set_mode(FanMode.AUTO)
+
+        # 9 samples at 55C, then 1 sample spike at 86C
+        for t in range(9):
+            engine.tick_thermal_update(55.0, 50.0, now=float(t))
+
+        snap = engine.tick_thermal_update(86.0, 50.0, now=9.0)
+        # Average is (9*55 + 86) / 10 = 58.1C < 80C
+        self.assertFalse(snap["emergency_override"])
+        self.assertLess(snap["sensor_averages"]["CPU Package"], 60.0)
+        self.assertEqual(engine.backend.last_commanded_mode, "auto")
+
+    def test_multi_sensor_monitoring_individual_core(self):
+        """Test that multi-sensor tracking monitors all cores and triggers when a specific core averages >= 80C."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
+        engine = FanControllerEngine()
+        engine.set_mode(FanMode.AUTO)
+
+        # Core 12 runs hot (82C) while CPU package is only 70C and GPU is 50C
+        for t in range(10):
+            sensors = {
+                "CPU Package": 70.0,
+                "CPU Core 0": 55.0,
+                "CPU Core 4": 58.0,
+                "CPU Core 12": 82.0,
+                "GPU Core": 50.0,
+                "NVMe SSD": 38.0,
+            }
+            snap = engine.tick_thermal_update(70.0, 50.0, now=float(t), all_sensors=sensors)
+
+        self.assertTrue(snap["emergency_override"])
+        self.assertEqual(snap["active_cpu_pct"], 100)
+        self.assertIn("CPU Core 12", snap["status_message"])
+        self.assertAlmostEqual(snap["sensor_averages"]["CPU Core 12"], 82.0, places=1)
+
+    def test_rolling_average_cooldown_recovery(self):
+        """Test that when rolling averages cool below 75C, fans recover to normal control."""
+        from alg_rgb_gui.fan_controller import FanControllerEngine, FanMode
+        engine = FanControllerEngine()
+        engine.set_mode(FanMode.AUTO)
+
+        # Trigger max speed with 10s of 82C
+        for t in range(10):
+            snap = engine.tick_thermal_update(82.0, 50.0, now=float(t))
+        self.assertTrue(snap["emergency_override"])
+
+        # Temperature drops to 55C. Feed samples until 10s average drops below 75C
+        for t in range(10, 20):
+            snap = engine.tick_thermal_update(55.0, 48.0, now=float(t))
+
+        self.assertFalse(snap["emergency_override"])
+        self.assertEqual(engine.backend.last_commanded_mode, "auto")
+        self.assertEqual(snap["active_cpu_pct"], 0)
 
     def test_widget_instantiation(self):
         """Test ThermalsAndFanWidget GUI instantiation with all cards."""

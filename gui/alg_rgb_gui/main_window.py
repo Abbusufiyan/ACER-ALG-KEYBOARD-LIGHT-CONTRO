@@ -483,7 +483,7 @@ class AcerAlgRgbWindow(QMainWindow):
         self.chk_tray_close.toggled.connect(lambda v: self.config.set("minimize_to_tray", v))
         s_layout.addWidget(self.chk_tray_close)
 
-        desc_lbl = QLabel("Acer ALG RGB & Thermal Controller v0.1.3")
+        desc_lbl = QLabel("Acer ALG Control Center v0.1.4")
         desc_lbl.setStyleSheet("font-size: 10px; color: #6c7086;")
         s_layout.addWidget(desc_lbl)
         diag_layout.addWidget(settings_card)
